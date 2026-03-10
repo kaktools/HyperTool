@@ -25,7 +25,7 @@ public sealed class HelpWindow : Window
 
         Title = "HyperTool Hilfe";
         DwmWindowHelper.ApplyRoundedCorners(this);
-        AppWindow.Resize(new SizeInt32(860, 720));
+        DwmWindowHelper.ResizeForCurrentDpi(this, 860, 720);
         TryApplyWindowIcon();
 
         Content = BuildLayout();

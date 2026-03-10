@@ -1,5 +1,6 @@
 using HyperTool.Models;
 using HyperTool.Services;
+using HyperTool.WinUI.Helpers;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Markup;
@@ -13,7 +14,6 @@ using System.Diagnostics;
 using System.Media;
 using System.Net.Http;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 using Windows.Media.Core;
@@ -686,33 +686,8 @@ internal sealed class GuestMainWindow : Window
 
     private void TryApplyInitialWindowSize()
     {
-        try
-        {
-            if (AppWindow is not null)
-            {
-                var scale = 1d;
-                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-                if (hwnd != nint.Zero)
-                {
-                    var dpi = GetDpiForWindow(hwnd);
-                    if (dpi > 0)
-                    {
-                        scale = Math.Clamp(dpi / 96d, 1d, 3d);
-                    }
-                }
-
-                var scaledWidth = (int)Math.Round(DefaultWindowWidth * scale);
-                var scaledHeight = (int)Math.Round(DefaultWindowHeight * scale);
-                AppWindow.Resize(new SizeInt32(scaledWidth, scaledHeight));
-            }
-        }
-        catch
-        {
-        }
+        DwmWindowHelper.ResizeForCurrentDpi(this, DefaultWindowWidth, DefaultWindowHeight);
     }
-
-    [DllImport("user32.dll")]
-    private static extern uint GetDpiForWindow(nint hWnd);
 
     public void UpdateUsbDevices(IReadOnlyList<UsbIpDeviceInfo> devices)
     {

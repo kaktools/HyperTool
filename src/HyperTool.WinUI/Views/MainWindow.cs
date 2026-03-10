@@ -25,7 +25,6 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Input;
-using System.Runtime.InteropServices;
 using Windows.Media.Core;
 using Windows.Media.Playback;
 using Windows.Graphics;
@@ -1414,33 +1413,8 @@ public sealed class MainWindow : Window
 
     private void TryApplyInitialWindowSize()
     {
-        try
-        {
-            if (AppWindow is not null)
-            {
-                var scale = 1d;
-                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-                if (hwnd != nint.Zero)
-                {
-                    var dpi = GetDpiForWindow(hwnd);
-                    if (dpi > 0)
-                    {
-                        scale = Math.Clamp(dpi / 96d, 1d, 3d);
-                    }
-                }
-
-                var scaledWidth = (int)Math.Round(DefaultWindowWidth * scale);
-                var scaledHeight = (int)Math.Round(DefaultWindowHeight * scale);
-                AppWindow.Resize(new SizeInt32(scaledWidth, scaledHeight));
-            }
-        }
-        catch
-        {
-        }
+        DwmWindowHelper.ResizeForCurrentDpi(this, DefaultWindowWidth, DefaultWindowHeight);
     }
-
-    [DllImport("user32.dll")]
-    private static extern uint GetDpiForWindow(nint hWnd);
 
     private UIElement BuildLayout()
     {

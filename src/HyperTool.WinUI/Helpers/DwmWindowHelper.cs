@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using System.Runtime.InteropServices;
+using Windows.Graphics;
 
 namespace HyperTool.WinUI.Helpers;
 
@@ -67,6 +68,48 @@ internal static class DwmWindowHelper
         }
     }
 
+    internal static SizeInt32 ScaleLogicalSizeForCurrentDpi(Window window, int logicalWidth, int logicalHeight)
+    {
+        var scale = 1d;
+
+        try
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            if (hwnd != nint.Zero)
+            {
+                var dpi = GetDpiForWindow(hwnd);
+                if (dpi > 0)
+                {
+                    scale = Math.Clamp(dpi / 96d, 1d, 3d);
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        var width = (int)Math.Round(logicalWidth * scale);
+        var height = (int)Math.Round(logicalHeight * scale);
+        return new SizeInt32(width, height);
+    }
+
+    internal static void ResizeForCurrentDpi(Window window, int logicalWidth, int logicalHeight)
+    {
+        try
+        {
+            if (window.AppWindow is null)
+            {
+                return;
+            }
+
+            var scaledSize = ScaleLogicalSizeForCurrentDpi(window, logicalWidth, logicalHeight);
+            window.AppWindow.Resize(scaledSize);
+        }
+        catch
+        {
+        }
+    }
+
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(
         nint hwnd,
@@ -85,6 +128,9 @@ internal static class DwmWindowHelper
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern int SetWindowRgn(nint hWnd, nint hRgn, bool redraw);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(nint hWnd);
 
     [DllImport("gdi32.dll", SetLastError = true)]
     private static extern bool DeleteObject(nint hObject);

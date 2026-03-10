@@ -55,7 +55,7 @@ public sealed class SplashWindow : Window
 
         try
         {
-            AppWindow.Resize(new SizeInt32(SplashWidth, SplashHeight));
+            DwmWindowHelper.ResizeForCurrentDpi(this, SplashWidth, SplashHeight);
             AppWindow.IsShownInSwitchers = false;
             CenterOnCurrentDisplay();
         }

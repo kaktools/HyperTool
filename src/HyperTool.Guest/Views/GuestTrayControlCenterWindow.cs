@@ -297,8 +297,9 @@ internal sealed class GuestTrayControlCenterWindow : Window
 
     private void SetPanelSize(int width, int height)
     {
-        AppWindow.Resize(new SizeInt32(width, height));
-        DwmWindowHelper.ApplyRoundedRegion(this, width, height, PanelCornerRadius);
+        var scaledSize = DwmWindowHelper.ScaleLogicalSizeForCurrentDpi(this, width, height);
+        AppWindow.Resize(scaledSize);
+        DwmWindowHelper.ApplyRoundedRegion(this, scaledSize.Width, scaledSize.Height, PanelCornerRadius);
     }
 
     private static Style CreateActionButtonStyle()

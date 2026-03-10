@@ -49,7 +49,7 @@ public sealed class ExitScreenWindow : Window
 
         try
         {
-            AppWindow.Resize(new SizeInt32(MainWindow.DefaultWindowWidth, MainWindow.DefaultWindowHeight));
+            DwmWindowHelper.ResizeForCurrentDpi(this, MainWindow.DefaultWindowWidth, MainWindow.DefaultWindowHeight);
             AppWindow.IsShownInSwitchers = false;
         }
         catch

@@ -46,7 +46,7 @@ public sealed class HostNetworkWindow : Window
 
         Title = "Host Network";
         DwmWindowHelper.ApplyRoundedCorners(this);
-        AppWindow.Resize(new SizeInt32(1060, 640));
+        DwmWindowHelper.ResizeForCurrentDpi(this, 1060, 640);
         TryApplyWindowIcon();
 
         Content = BuildLayout();

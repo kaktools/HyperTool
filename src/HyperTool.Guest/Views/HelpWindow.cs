@@ -2,6 +2,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using HyperTool.WinUI.Helpers;
 using System.Diagnostics;
 using System.IO;
 using Windows.Graphics;
@@ -23,7 +24,7 @@ public sealed class HelpWindow : Window
         _isDarkMode = string.Equals(uiTheme, "dark", StringComparison.OrdinalIgnoreCase);
 
         Title = "HyperTool Guest Hilfe";
-        AppWindow.Resize(new SizeInt32(860, 720));
+        DwmWindowHelper.ResizeForCurrentDpi(this, 860, 720);
 
         Content = BuildLayout();
         ApplyRequestedTheme();
