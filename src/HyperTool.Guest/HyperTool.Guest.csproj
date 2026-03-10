@@ -16,6 +16,7 @@
     <Nullable>enable</Nullable>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <UseWindowsForms>false</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\HyperTool.Guest.ico</ApplicationIcon>
     <Win32Icon>Assets\HyperTool.Guest.ico</Win32Icon>
   </PropertyGroup>

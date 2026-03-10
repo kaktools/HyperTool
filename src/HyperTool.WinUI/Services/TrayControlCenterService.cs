@@ -751,6 +751,9 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         var popupWidth = GetPopupWidth(_mode);
         var popupHeight = GetPopupHeight(_mode);
         _window.SetPanelSize(popupWidth, popupHeight);
+        var scaledPanelSize = _window.CurrentScaledPanelSize;
+        var scaledPopupWidth = scaledPanelSize.Width > 0 ? scaledPanelSize.Width : popupWidth;
+        var scaledPopupHeight = scaledPanelSize.Height > 0 ? scaledPanelSize.Height : popupHeight;
 
         if (!GetCursorPos(out var cursorPos))
         {
@@ -761,8 +764,8 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         var work = displayArea.WorkArea;
         var bounds = displayArea.OuterBounds;
 
-        var x = cursorPos.X - popupWidth + 24;
-        var y = work.Y + work.Height - popupHeight - 8;
+        var x = cursorPos.X - scaledPopupWidth + 24;
+        var y = work.Y + work.Height - scaledPopupHeight - 8;
 
         var taskbarAtBottom = work.Y + work.Height < bounds.Y + bounds.Height;
         var taskbarAtTop = work.Y > bounds.Y;
@@ -775,7 +778,7 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         }
         else if (taskbarAtBottom)
         {
-            y = work.Y + work.Height - popupHeight - 8;
+            y = work.Y + work.Height - scaledPopupHeight - 8;
         }
 
         if (taskbarAtLeft)
@@ -784,11 +787,11 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         }
         else if (taskbarAtRight)
         {
-            x = work.X + work.Width - popupWidth - 8;
+            x = work.X + work.Width - scaledPopupWidth - 8;
         }
 
         var minX = work.X + 8;
-        var maxX = work.X + work.Width - popupWidth - 8;
+        var maxX = work.X + work.Width - scaledPopupWidth - 8;
         if (maxX < minX)
         {
             x = work.X;
@@ -799,7 +802,7 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         }
 
         var minY = work.Y + 8;
-        var maxY = work.Y + work.Height - popupHeight - 8;
+        var maxY = work.Y + work.Height - scaledPopupHeight - 8;
         if (maxY < minY)
         {
             y = work.Y;

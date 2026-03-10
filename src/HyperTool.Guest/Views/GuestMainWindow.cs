@@ -316,6 +316,7 @@ internal sealed class GuestMainWindow : Window
         _themeCombo.Items.Add("light");
 
         Content = BuildLayout();
+        DwmWindowHelper.ApplyContentCompensationForCurrentDpi(this, DefaultWindowWidth, DefaultWindowHeight);
         ApplyConfigToControls();
         ApplyTheme(config.Ui.Theme);
         TryApplyWindowIcon();
@@ -1066,7 +1067,15 @@ internal sealed class GuestMainWindow : Window
         sidebarStack.Children.Add(CreateNavButton("📁", "Shared Folder", 1));
         sidebarStack.Children.Add(CreateNavButton("⚙", "Einstellungen", 2));
         sidebarStack.Children.Add(CreateNavButton("ℹ", "Info", 3));
-        sidebar.Child = sidebarStack;
+
+        sidebar.Child = new ScrollViewer
+        {
+            Content = sidebarStack,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollMode = ScrollMode.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalScrollMode = ScrollMode.Disabled
+        };
 
         mainGrid.Children.Add(sidebar);
 

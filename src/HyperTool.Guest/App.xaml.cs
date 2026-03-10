@@ -102,6 +102,7 @@ public sealed partial class App : Application
 
     private readonly List<UsbIpDeviceInfo> _usbDevices = [];
     private readonly Dictionary<string, UsbDeviceMetadataEntry> _hostUsbMetadataByKey = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _hostUsbDescriptionsByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbAutoConnectBackoffUntilUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbHeartbeatLastSentByBusId = new(StringComparer.OrdinalIgnoreCase);
     private string? _selectedUsbBusId;
@@ -1885,6 +1886,9 @@ public sealed partial class App : Application
         var popupHeight = _minimizeToTray
             ? GuestTrayControlCenterWindow.PopupHeightWithUsb
             : GuestTrayControlCenterWindow.PopupHeightCompact;
+        var scaledPanelSize = _trayControlCenterWindow.CurrentScaledPanelSize;
+        var scaledPopupWidth = scaledPanelSize.Width > 0 ? scaledPanelSize.Width : popupWidth;
+        var scaledPopupHeight = scaledPanelSize.Height > 0 ? scaledPanelSize.Height : popupHeight;
 
         if (!GetCursorPos(out var cursorPos))
         {
@@ -1895,8 +1899,8 @@ public sealed partial class App : Application
         var work = displayArea.WorkArea;
         var bounds = displayArea.OuterBounds;
 
-        var x = cursorPos.X - popupWidth + 24;
-        var y = work.Y + work.Height - popupHeight - 8;
+        var x = cursorPos.X - scaledPopupWidth + 24;
+        var y = work.Y + work.Height - scaledPopupHeight - 8;
 
         var taskbarAtBottom = work.Y + work.Height < bounds.Y + bounds.Height;
         var taskbarAtTop = work.Y > bounds.Y;
@@ -1909,7 +1913,7 @@ public sealed partial class App : Application
         }
         else if (taskbarAtBottom)
         {
-            y = work.Y + work.Height - popupHeight - 8;
+            y = work.Y + work.Height - scaledPopupHeight - 8;
         }
 
         if (taskbarAtLeft)
@@ -1918,11 +1922,11 @@ public sealed partial class App : Application
         }
         else if (taskbarAtRight)
         {
-            x = work.X + work.Width - popupWidth - 8;
+            x = work.X + work.Width - scaledPopupWidth - 8;
         }
 
-        x = Math.Clamp(x, work.X + 8, work.X + work.Width - popupWidth - 8);
-        y = Math.Clamp(y, work.Y + 8, work.Y + work.Height - popupHeight - 8);
+        x = Math.Clamp(x, work.X + 8, work.X + work.Width - scaledPopupWidth - 8);
+        y = Math.Clamp(y, work.Y + 8, work.Y + work.Height - scaledPopupHeight - 8);
 
         try
         {
@@ -2010,8 +2014,11 @@ public sealed partial class App : Application
 
         if (_config?.Usb?.Enabled == false)
         {
-            _usbDevices.Clear();
-            UpdateUsbViews();
+            if (_usbDevices.Count > 0)
+            {
+                _usbDevices.Clear();
+                UpdateUsbViews();
+            }
 
             if (emitLogs)
             {
@@ -2023,8 +2030,11 @@ public sealed partial class App : Application
 
         if (_config?.Usb?.HostFeatureEnabled == false)
         {
-            _usbDevices.Clear();
-            UpdateUsbViews();
+            if (_usbDevices.Count > 0)
+            {
+                _usbDevices.Clear();
+                UpdateUsbViews();
+            }
 
             if (emitLogs)
             {
@@ -2036,8 +2046,11 @@ public sealed partial class App : Application
 
         if (!_isUsbClientAvailable)
         {
-            _usbDevices.Clear();
-            UpdateUsbViews();
+            if (_usbDevices.Count > 0)
+            {
+                _usbDevices.Clear();
+                UpdateUsbViews();
+            }
 
             if (!_usbClientMissingLogged)
             {
@@ -2136,12 +2149,28 @@ public sealed partial class App : Application
                 }
             }
 
-            _usbDevices.Clear();
-            _usbDevices.AddRange(list);
+            var hasUsbListChanged = !UsbDeviceListsMatch(_usbDevices, list);
+
+            if (hasUsbListChanged)
+            {
+                _usbDevices.Clear();
+                _usbDevices.AddRange(list);
+            }
+
+            var selectedBusIdChanged = false;
+            if (!string.IsNullOrWhiteSpace(_selectedUsbBusId)
+                && !_usbDevices.Any(item => string.Equals(item.BusId, _selectedUsbBusId, StringComparison.OrdinalIgnoreCase)))
+            {
+                _selectedUsbBusId = _usbDevices.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.BusId))?.BusId;
+                selectedBusIdChanged = true;
+            }
 
             ApplyUsbTransportResolution(hostResolution, fallbackToIpUsed);
 
-            UpdateUsbViews();
+            if (hasUsbListChanged || selectedBusIdChanged)
+            {
+                UpdateUsbViews();
+            }
 
             if (emitLogs)
             {
@@ -2197,6 +2226,40 @@ public sealed partial class App : Application
         {
             _usbRefreshGate.Release();
         }
+    }
+
+    private static bool UsbDeviceListsMatch(IReadOnlyList<UsbIpDeviceInfo> current, IReadOnlyList<UsbIpDeviceInfo> next)
+    {
+        if (ReferenceEquals(current, next))
+        {
+            return true;
+        }
+
+        if (current.Count != next.Count)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < current.Count; i++)
+        {
+            var left = current[i];
+            var right = next[i];
+
+            if (!string.Equals(left.BusId, right.BusId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(left.Description, right.Description, StringComparison.Ordinal)
+                || !string.Equals(left.HardwareId, right.HardwareId, StringComparison.Ordinal)
+                || !string.Equals(left.InstanceId, right.InstanceId, StringComparison.Ordinal)
+                || !string.Equals(left.PersistedGuid, right.PersistedGuid, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(left.ClientIpAddress, right.ClientIpAddress, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(left.AttachedGuestComputerName, right.AttachedGuestComputerName, StringComparison.Ordinal)
+                || !string.Equals(left.CustomName, right.CustomName, StringComparison.Ordinal)
+                || !string.Equals(left.CustomComment, right.CustomComment, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private async Task CleanupDanglingGuestAttachmentsAsync(IReadOnlyList<UsbIpDeviceInfo> remoteDevices, string hostAddress)
@@ -3544,6 +3607,7 @@ public sealed partial class App : Application
         }
 
         _hostUsbMetadataByKey.Clear();
+        _hostUsbDescriptionsByKey.Clear();
         foreach (var entry in identity.Features?.UsbDeviceMetadata ?? [])
         {
             if (entry is null)
@@ -3572,12 +3636,46 @@ public sealed partial class App : Application
             };
         }
 
-        foreach (var usb in _usbDevices)
+        foreach (var entry in identity.Features?.UsbDeviceDescriptions ?? [])
         {
-            ApplyHostUsbMetadata(usb);
+            if (entry is null)
+            {
+                continue;
+            }
+
+            var key = (entry.DeviceKey ?? string.Empty).Trim();
+            var description = (entry.Description ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(description))
+            {
+                continue;
+            }
+
+            _hostUsbDescriptionsByKey[key] = description;
         }
 
-        UpdateUsbViews();
+        var usbVisualChanged = false;
+        foreach (var usb in _usbDevices)
+        {
+            var beforeDescription = usb.Description;
+            var beforeCustomName = usb.CustomName;
+            var beforeCustomComment = usb.CustomComment;
+            var beforeIdentityKey = usb.DeviceIdentityKey;
+
+            ApplyHostUsbMetadata(usb);
+
+            if (!string.Equals(beforeDescription, usb.Description, StringComparison.Ordinal)
+                || !string.Equals(beforeCustomName, usb.CustomName, StringComparison.Ordinal)
+                || !string.Equals(beforeCustomComment, usb.CustomComment, StringComparison.Ordinal)
+                || !string.Equals(beforeIdentityKey, usb.DeviceIdentityKey, StringComparison.OrdinalIgnoreCase))
+            {
+                usbVisualChanged = true;
+            }
+        }
+
+        if (usbVisualChanged)
+        {
+            UpdateUsbViews();
+        }
 
         if (!changed)
         {
@@ -3599,7 +3697,8 @@ public sealed partial class App : Application
             hostName = _config.Usb.HostName,
             usbSharingEnabled = _config.Usb.HostFeatureEnabled,
             sharedFoldersEnabled = _config.SharedFolders.HostFeatureEnabled,
-            usbMetadataCount = _hostUsbMetadataByKey.Count
+            usbMetadataCount = _hostUsbMetadataByKey.Count,
+            usbDescriptionCount = _hostUsbDescriptionsByKey.Count
         });
     }
 
@@ -3779,6 +3878,16 @@ public sealed partial class App : Application
         if (device is null)
         {
             return;
+        }
+
+        foreach (var lookupKey in BuildUsbIdentityAliasKeys(device))
+        {
+            if (_hostUsbDescriptionsByKey.TryGetValue(lookupKey, out var hostDescription)
+                && !string.IsNullOrWhiteSpace(hostDescription))
+            {
+                device.Description = hostDescription;
+                break;
+            }
         }
 
         var key = BuildUsbDeviceIdentityKey(device);
@@ -4025,12 +4134,13 @@ public sealed partial class App : Application
         }
 
         Exception? lastError = null;
-        for (var attempt = 1; attempt <= 2; attempt++)
+        const int maxAttempts = 4;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                linkedCts.CancelAfter(TimeSpan.FromMilliseconds(1200));
+            linkedCts.CancelAfter(TimeSpan.FromMilliseconds(1800));
 
                 using var socket = new System.Net.Sockets.Socket((System.Net.Sockets.AddressFamily)34, System.Net.Sockets.SocketType.Stream, (System.Net.Sockets.ProtocolType)1);
                 linkedCts.Token.ThrowIfCancellationRequested();
@@ -4078,11 +4188,11 @@ public sealed partial class App : Application
             catch (Exception ex)
             {
                 lastError = ex;
-                if (attempt < 2)
+                if (attempt < maxAttempts)
                 {
                     try
                     {
-                        await Task.Delay(TimeSpan.FromMilliseconds(140), cancellationToken);
+                        await Task.Delay(TimeSpan.FromMilliseconds(220), cancellationToken);
                     }
                     catch
                     {
@@ -4106,7 +4216,7 @@ public sealed partial class App : Application
                 {
                     busId = busId.Trim(),
                     eventType = eventType.Trim(),
-                    attempts = 2,
+                    attempts = maxAttempts,
                     exceptionType = lastError.GetType().FullName
                 },
                 scopeKey,

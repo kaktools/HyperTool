@@ -269,7 +269,8 @@ public sealed partial class App : Application
                     if (_mainViewModel is not null
                         && !string.IsNullOrWhiteSpace(ack.BusId)
                         && (string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
-                            || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)))
+                            || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)))
                     {
                         TriggerHostUsbRefreshForDiagnosticsEvent();
                     }
@@ -558,7 +559,8 @@ public sealed partial class App : Application
                     if (_mainViewModel is not null
                         && !string.IsNullOrWhiteSpace(ack.BusId)
                         && (string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
-                            || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)))
+                            || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)))
                     {
                         TriggerHostUsbRefreshForDiagnosticsEvent();
                     }
@@ -2164,8 +2166,7 @@ public sealed partial class App : Application
                 if (_mainViewModel is not null
                     && !_isExitRequested
                     && !_isThemeWindowReopenInProgress
-                    && !_mainViewModel.IsBusy
-                    && _mainViewModel.HasUsbAutoShareConfigured)
+                    && !_mainViewModel.IsBusy)
                 {
                     await RefreshHostUsbDevicesSafeAsync();
                 }
@@ -3096,7 +3097,8 @@ public sealed partial class App : Application
                     UsbSharingEnabled = _mainViewModel?.HostUsbSharingEnabled ?? true,
                     SharedFoldersEnabled = _mainViewModel?.HostSharedFoldersEnabled ?? true
                 },
-                usbMetadataProvider: () => _mainViewModel?.GetUsbDeviceMetadataSnapshot() ?? []);
+                usbMetadataProvider: () => _mainViewModel?.GetUsbDeviceMetadataSnapshot() ?? [],
+                usbDescriptionProvider: () => _mainViewModel?.GetUsbDeviceDescriptionSnapshot() ?? []);
             _hostIdentityHostListener.Start();
             Log.Information(isThemeRestart
                 ? "Hyper-V socket host-identity listener restarted after theme change."
@@ -3131,7 +3133,8 @@ public sealed partial class App : Application
                     UsbSharingEnabled = _mainViewModel?.HostUsbSharingEnabled ?? true,
                     SharedFoldersEnabled = _mainViewModel?.HostSharedFoldersEnabled ?? true
                 },
-                usbMetadataProvider: () => _mainViewModel?.GetUsbDeviceMetadataSnapshot() ?? []);
+                usbMetadataProvider: () => _mainViewModel?.GetUsbDeviceMetadataSnapshot() ?? [],
+                usbDescriptionProvider: () => _mainViewModel?.GetUsbDeviceDescriptionSnapshot() ?? []);
             _hostIdentityHostListener.Start();
             Log.Information("Hyper-V socket host-identity listener started after elevated registration helper.");
         }

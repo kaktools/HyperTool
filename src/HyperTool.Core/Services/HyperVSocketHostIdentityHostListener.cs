@@ -13,6 +13,7 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
     private readonly Guid _serviceId;
     private readonly Func<HostFeatureAvailability>? _featureAvailabilityProvider;
     private readonly Func<IReadOnlyList<UsbDeviceMetadataEntry>>? _usbMetadataProvider;
+    private readonly Func<IReadOnlyList<UsbDeviceHostDescriptionEntry>>? _usbDescriptionProvider;
     private Socket? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptLoopTask;
@@ -25,11 +26,13 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
     public HyperVSocketHostIdentityHostListener(
         Guid? serviceId = null,
         Func<HostFeatureAvailability>? featureAvailabilityProvider = null,
-        Func<IReadOnlyList<UsbDeviceMetadataEntry>>? usbMetadataProvider = null)
+        Func<IReadOnlyList<UsbDeviceMetadataEntry>>? usbMetadataProvider = null,
+        Func<IReadOnlyList<UsbDeviceHostDescriptionEntry>>? usbDescriptionProvider = null)
     {
         _serviceId = serviceId ?? HyperVSocketUsbTunnelDefaults.HostIdentityServiceId;
         _featureAvailabilityProvider = featureAvailabilityProvider;
         _usbMetadataProvider = usbMetadataProvider;
+        _usbDescriptionProvider = usbDescriptionProvider;
     }
 
     public bool IsRunning { get; private set; }
@@ -126,6 +129,16 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
             usbMetadata = [];
         }
 
+        IReadOnlyList<UsbDeviceHostDescriptionEntry> usbDescriptions;
+        try
+        {
+            usbDescriptions = _usbDescriptionProvider?.Invoke() ?? [];
+        }
+        catch
+        {
+            usbDescriptions = [];
+        }
+
         featureAvailability.UsbDeviceMetadata = usbMetadata
             .Where(entry => entry is not null)
             .Select(entry => new UsbDeviceMetadataEntry
@@ -139,6 +152,17 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
                                 || !string.IsNullOrWhiteSpace(entry.Comment)))
             .ToList();
 
+        featureAvailability.UsbDeviceDescriptions = usbDescriptions
+            .Where(entry => entry is not null)
+            .Select(entry => new UsbDeviceHostDescriptionEntry
+            {
+                DeviceKey = (entry.DeviceKey ?? string.Empty).Trim(),
+                Description = (entry.Description ?? string.Empty).Trim()
+            })
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.DeviceKey)
+                            && !string.IsNullOrWhiteSpace(entry.Description))
+            .ToList();
+
         var payload = JsonSerializer.Serialize(new
         {
             hostName = Environment.MachineName,
@@ -147,7 +171,8 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
             {
                 usbSharingEnabled = featureAvailability.UsbSharingEnabled,
                 sharedFoldersEnabled = featureAvailability.SharedFoldersEnabled,
-                usbDeviceMetadata = featureAvailability.UsbDeviceMetadata
+                usbDeviceMetadata = featureAvailability.UsbDeviceMetadata,
+                usbDeviceDescriptions = featureAvailability.UsbDeviceDescriptions
             },
             timestampUtc = DateTime.UtcNow
         }, SerializerOptions);

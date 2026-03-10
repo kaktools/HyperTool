@@ -33,6 +33,7 @@ internal sealed class GuestTrayControlCenterWindow : Window
 
     private bool _isUpdatingUsbSelection;
     private bool _isTrayMenuEnabled = true;
+    private SizeInt32 _currentScaledPanelSize;
 
     public event Action? CloseRequested;
     public event Action? RefreshUsbRequested;
@@ -41,6 +42,8 @@ internal sealed class GuestTrayControlCenterWindow : Window
     public event Action? UsbDisconnectRequested;
     public event Action? ToggleVisibilityRequested;
     public event Action? ExitRequested;
+
+    public SizeInt32 CurrentScaledPanelSize => _currentScaledPanelSize;
 
     public GuestTrayControlCenterWindow()
     {
@@ -272,7 +275,14 @@ internal sealed class GuestTrayControlCenterWindow : Window
         _exitButton.Click += (_, _) => ExitRequested?.Invoke();
         stack.Children.Add(_exitButton);
 
-        _panelRoot.Child = stack;
+        _panelRoot.Child = new ScrollViewer
+        {
+            Content = stack,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalScrollMode = ScrollMode.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollMode = ScrollMode.Auto
+        };
         _windowRoot.Children.Add(_panelRoot);
         Content = _windowRoot;
     }
@@ -298,7 +308,9 @@ internal sealed class GuestTrayControlCenterWindow : Window
     private void SetPanelSize(int width, int height)
     {
         var scaledSize = DwmWindowHelper.ScaleLogicalSizeForCurrentDpi(this, width, height);
+        _currentScaledPanelSize = scaledSize;
         AppWindow.Resize(scaledSize);
+        DwmWindowHelper.ApplyContentCompensationForCurrentDpi(this, width, height);
         DwmWindowHelper.ApplyRoundedRegion(this, scaledSize.Width, scaledSize.Height, PanelCornerRadius);
     }
 

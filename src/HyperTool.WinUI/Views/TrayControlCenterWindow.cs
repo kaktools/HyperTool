@@ -58,6 +58,7 @@ internal sealed class TrayControlCenterWindow : Window
     private SolidColorBrush _vmRunningBrush = new(new Color { A = 0xFF, R = 0xA8, G = 0xD8, B = 0xBE });
     private SolidColorBrush _vmOffBrush = new(new Color { A = 0xFF, R = 0xDE, G = 0xA2, B = 0xA8 });
     private bool _isDarkTheme = true;
+    private SizeInt32 _currentScaledPanelSize;
     private Color _chipBackground = Color.FromArgb(0xFF, 0x2A, 0x39, 0x58);
     private Color _chipBorder = Color.FromArgb(0xFF, 0x5A, 0x7B, 0xAF);
     private Color _chipForeground = Color.FromArgb(0xFF, 0xE8, 0xF1, 0xFF);
@@ -80,6 +81,8 @@ internal sealed class TrayControlCenterWindow : Window
     public event Action? UsbUnshareRequested;
     public event Action? ExitRequested;
     public event Action? ToggleVisibilityRequested;
+
+    public SizeInt32 CurrentScaledPanelSize => _currentScaledPanelSize;
 
     public TrayControlCenterWindow()
     {
@@ -497,7 +500,9 @@ internal sealed class TrayControlCenterWindow : Window
     public void SetPanelSize(int width, int height)
     {
         var scaledSize = DwmWindowHelper.ScaleLogicalSizeForCurrentDpi(this, width, height);
+        _currentScaledPanelSize = scaledSize;
         AppWindow.Resize(scaledSize);
+        DwmWindowHelper.ApplyContentCompensationForCurrentDpi(this, width, height);
         DwmWindowHelper.ApplyRoundedRegion(this, scaledSize.Width, scaledSize.Height, PanelCornerRadius);
     }
 
@@ -783,7 +788,14 @@ internal sealed class TrayControlCenterWindow : Window
         stack.Children.Add(_fullBottomActionsPanel);
         stack.Children.Add(_compactActionsPanel);
 
-        _panelRoot.Child = stack;
+        _panelRoot.Child = new ScrollViewer
+        {
+            Content = stack,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalScrollMode = ScrollMode.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollMode = ScrollMode.Auto
+        };
         _windowRoot.Children.Add(_panelRoot);
         _windowRoot.KeyDown += OnRootKeyDown;
 

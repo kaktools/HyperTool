@@ -200,6 +200,7 @@ public sealed class MainWindow : Window
 
         _windowHost = BuildWindowHost(initialMainContent);
         Content = _windowHost;
+        DwmWindowHelper.ApplyContentCompensationForCurrentDpi(this, DefaultWindowWidth, DefaultWindowHeight);
 
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
         _viewModel.AvailableVms.CollectionChanged += OnAvailableVmsCollectionChanged;
@@ -1612,38 +1613,31 @@ public sealed class MainWindow : Window
             Background = Application.Current.Resources["PanelBackgroundBrush"] as Brush,
             Padding = new Thickness(10)
         };
-        var sidebarGrid = new Grid();
-        for (var rowIndex = 0; rowIndex < 13; rowIndex++)
-        {
-            sidebarGrid.RowDefinitions.Add(new RowDefinition
-            {
-                Height = rowIndex % 2 == 0
-                    ? new GridLength(1, GridUnitType.Star)
-                    : GridLength.Auto
-            });
-        }
+        var sidebarStack = new StackPanel { Spacing = 8 };
 
         var vmNavButton = CreateNavButton("▶", "VM", 0);
-        Grid.SetRow(vmNavButton, 1);
-        sidebarGrid.Children.Add(vmNavButton);
+        sidebarStack.Children.Add(vmNavButton);
         var usbNavButton = CreateNavButton("🔌", "USB-Share", 1);
         _usbNavButton = usbNavButton;
-        Grid.SetRow(usbNavButton, 3);
-        sidebarGrid.Children.Add(usbNavButton);
+        sidebarStack.Children.Add(usbNavButton);
         var sharedFolderNavButton = CreateNavButton("📁", "Shared Folder", 2);
         _sharedFolderNavButton = sharedFolderNavButton;
-        Grid.SetRow(sharedFolderNavButton, 5);
-        sidebarGrid.Children.Add(sharedFolderNavButton);
+        sidebarStack.Children.Add(sharedFolderNavButton);
         var snapshotNavButton = CreateNavButton("📷", "Snapshots", 3);
-        Grid.SetRow(snapshotNavButton, 7);
-        sidebarGrid.Children.Add(snapshotNavButton);
+        sidebarStack.Children.Add(snapshotNavButton);
         var settingsNavButton = CreateNavButton("⚙", "Einstellungen", 4);
-        Grid.SetRow(settingsNavButton, 9);
-        sidebarGrid.Children.Add(settingsNavButton);
+        sidebarStack.Children.Add(settingsNavButton);
         var infoNavButton = CreateNavButton("ℹ", "Info", 5);
-        Grid.SetRow(infoNavButton, 11);
-        sidebarGrid.Children.Add(infoNavButton);
-        sidebar.Child = sidebarGrid;
+        sidebarStack.Children.Add(infoNavButton);
+
+        sidebar.Child = new ScrollViewer
+        {
+            Content = sidebarStack,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollMode = ScrollMode.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalScrollMode = ScrollMode.Disabled
+        };
         mainGrid.Children.Add(sidebar);
 
         var contentGrid = new Grid();
@@ -1660,11 +1654,11 @@ public sealed class MainWindow : Window
             Padding = new Thickness(12)
         };
         var selectedVmGrid = new Grid { ColumnSpacing = 12 };
-        selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
+        selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });
-        selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(110) });
-        selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
+        selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         selectedVmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         selectedVmGrid.Children.Add(new TextBlock { Text = "Selected VM", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
         var selectedVmName = new TextBlock();
@@ -1684,7 +1678,14 @@ public sealed class MainWindow : Window
         networkText.SetBinding(TextBlock.TextProperty, new Binding { Source = _viewModel, Path = new PropertyPath(nameof(MainViewModel.SelectedVmAdapterSwitchDisplay)) });
         Grid.SetColumn(networkText, 5);
         selectedVmGrid.Children.Add(networkText);
-        selectedVmRow.Child = selectedVmGrid;
+        selectedVmRow.Child = new ScrollViewer
+        {
+            Content = selectedVmGrid,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollMode = ScrollMode.Enabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollMode = ScrollMode.Disabled
+        };
         contentGrid.Children.Add(selectedVmRow);
 
         _vmPage = BuildVmPage();
@@ -1827,7 +1828,14 @@ public sealed class MainWindow : Window
         actionRow1.Children.Add(CreateIconButton("⏻", "Hard Off", _viewModel.TurnOffSelectedVmCommand));
         actionRow1.Children.Add(CreateIconButton("↻", "Restart", _viewModel.RestartSelectedVmCommand));
         actionRow1.Children.Add(CreateIconButton("🖥", "Open Console", _viewModel.OpenConsoleCommand));
-        actionStack.Children.Add(actionRow1);
+        actionStack.Children.Add(new ScrollViewer
+        {
+            Content = actionRow1,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollMode = ScrollMode.Enabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollMode = ScrollMode.Disabled
+        });
 
         var actionRow2 = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         actionRow2.Children.Add(CreateIconButton("🛠", "Konsole neu aufbauen", _viewModel.ReopenConsoleWithSessionEditCommand));
@@ -1854,7 +1862,14 @@ public sealed class MainWindow : Window
         var quickImportButton = CreateIconButton("📥", "Import", _viewModel.ImportVmCommand);
         ToolTipService.SetToolTip(quickImportButton, "Import: 1) VM-Quellordner wählen. 2) Nur im Kopiermodus ggf. Zielordner verwenden.");
         actionRow2.Children.Add(quickImportButton);
-        actionStack.Children.Add(actionRow2);
+        actionStack.Children.Add(new ScrollViewer
+        {
+            Content = actionRow2,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollMode = ScrollMode.Enabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollMode = ScrollMode.Disabled
+        });
         UpdateIsoActionButtons();
 
         actionCard.Child = actionStack;
@@ -4039,26 +4054,39 @@ public sealed class MainWindow : Window
         _vmChipRefreshDebounceTimer?.Start();
     }
 
-    private string BuildVmChipRefreshSignature()
+    private string BuildVmChipStructureSignature()
     {
-        var selectedVmName = _viewModel.SelectedVm?.Name ?? string.Empty;
         var snapshot = _viewModel.AvailableVms
-            .Select(vm => $"{vm.Name}|{vm.DisplayLabel}|{vm.RuntimeState}|{vm.RuntimeSwitchName}|{vm.HasMountedIso}|{vm.MountedIsoPath}|{vm.MonitorStateText}|{vm.MonitorCpuText}|{vm.MonitorRamText}")
+            .Select(vm => vm.Name ?? string.Empty)
             .ToArray();
 
-        return $"{selectedVmName}::{string.Join(";;", snapshot)}";
+        return string.Join(";;", snapshot);
     }
 
     private void RefreshVmChips()
     {
-        var signature = BuildVmChipRefreshSignature();
-        if (string.Equals(signature, _vmChipRefreshSignature, StringComparison.Ordinal))
+        var structureSignature = BuildVmChipStructureSignature();
+        if (string.Equals(structureSignature, _vmChipRefreshSignature, StringComparison.Ordinal))
         {
+            foreach (var child in _vmChipPanel.Children)
+            {
+                if (child is not Button chip || chip.Tag is not string vmName)
+                {
+                    continue;
+                }
+
+                var vm = _viewModel.AvailableVms.FirstOrDefault(item => string.Equals(item.Name, vmName, StringComparison.OrdinalIgnoreCase));
+                if (vm is not null)
+                {
+                    UpdateVmChipVisual(chip, vm);
+                }
+            }
+
             UpdateVmChipNavigationButtons();
             return;
         }
 
-        _vmChipRefreshSignature = signature;
+        _vmChipRefreshSignature = structureSignature;
         _vmChipPanel.Children.Clear();
 
         foreach (var vm in _viewModel.AvailableVms)
@@ -4348,7 +4376,32 @@ public sealed class MainWindow : Window
             Background = Application.Current.Resources["SurfaceSoftBrush"] as Brush
         };
 
+        chip.Tag = vm.Name;
+        UpdateVmChipVisual(chip, vm);
+
+        chip.Click += (_, _) =>
+        {
+            var currentVm = _viewModel.AvailableVms.FirstOrDefault(item => string.Equals(item.Name, vm.Name, StringComparison.OrdinalIgnoreCase));
+            if (currentVm is not null)
+            {
+                _viewModel.SelectVmFromChipCommand.Execute(currentVm);
+            }
+        };
+
+        var flyout = new MenuFlyout();
+        flyout.Opening += (_, _) => PopulateVmChipFlyout(flyout, vm.Name);
+        chip.ContextFlyout = flyout;
+
+        return chip;
+    }
+
+    private void UpdateVmChipVisual(Button chip, VmDefinition vm)
+    {
         var isDark = IsDarkMode();
+
+        chip.BorderThickness = new Thickness(1);
+        chip.BorderBrush = Application.Current.Resources["PanelBorderBrush"] as Brush;
+        chip.Background = Application.Current.Resources["SurfaceSoftBrush"] as Brush;
 
         if (IsVmRunningState(vm.RuntimeState))
         {
@@ -4475,10 +4528,23 @@ public sealed class MainWindow : Window
         chipContent.Children.Add(textStack);
 
         chip.Content = chipContent;
+    }
 
-        chip.Click += (_, _) => _viewModel.SelectVmFromChipCommand.Execute(vm);
+    private void PopulateVmChipFlyout(MenuFlyout flyout, string vmName)
+    {
+        if (flyout is null)
+        {
+            return;
+        }
 
-        var flyout = new MenuFlyout();
+        var vm = _viewModel.AvailableVms.FirstOrDefault(item => string.Equals(item.Name, vmName, StringComparison.OrdinalIgnoreCase));
+        if (vm is null)
+        {
+            flyout.Items.Clear();
+            return;
+        }
+
+        flyout.Items.Clear();
         flyout.Items.Add(CreateVmMenuItem("Start", () => _viewModel.StartVmByNameCommand.ExecuteAsync(vm.Name)));
         flyout.Items.Add(CreateVmMenuItem("Stop", () => _viewModel.StopVmByNameCommand.ExecuteAsync(vm.Name)));
         flyout.Items.Add(CreateVmMenuItem("Hard Off", () => _viewModel.TurnOffVmByNameCommand.ExecuteAsync(vm.Name)));
@@ -4494,15 +4560,13 @@ public sealed class MainWindow : Window
         {
             flyout.Items.Add(CreateVmMenuItem("ISO einbinden", () => MountIsoForVmAsync(vm)));
         }
+
         flyout.Items.Add(new MenuFlyoutSeparator());
         flyout.Items.Add(CreateVmMenuItem("Als Default-VM setzen", () => SetDefaultVmFromChipAsync(vm)));
         flyout.Items.Add(CreateVmMenuItem("Schnellstart-Verknüpfung erstellen", () => CreateVmQuickstartForVmAsync(vm)));
         flyout.Items.Add(new MenuFlyoutSeparator());
         flyout.Items.Add(CreateVmMenuItem("Open Console", () => _viewModel.OpenConsoleByNameCommand.ExecuteAsync(vm.Name)));
         flyout.Items.Add(CreateVmMenuItem("Snapshot", () => _viewModel.CreateSnapshotByNameCommand.ExecuteAsync(vm.Name)));
-        chip.ContextFlyout = flyout;
-
-        return chip;
     }
 
     private void OpenResourceMonitorWindow()

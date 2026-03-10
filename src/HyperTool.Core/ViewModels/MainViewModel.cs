@@ -22,7 +22,7 @@ public partial class MainViewModel : ViewModelBase
     private const int VkNumLock = 0x90;
     private const uint KeyeventfExtendedKey = 0x0001;
     private const uint KeyeventfKeyUp = 0x0002;
-    private static readonly TimeSpan StaleUsbAttachGracePeriod = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan StaleUsbAttachGracePeriod = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
@@ -1906,7 +1906,7 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task<int> TryDetachStaleAttachedDevicesWithoutGuestAckAsync(IReadOnlyList<UsbIpDeviceInfo> devices, CancellationToken token)
     {
-        var effectiveRetryAttempts = Math.Max(_usbAutoDetachRetryAttempts, 12);
+        var effectiveRetryAttempts = Math.Max(_usbAutoDetachRetryAttempts, 2);
 
         if (devices.Count == 0)
         {
@@ -2274,18 +2274,22 @@ public partial class MainViewModel : ViewModelBase
             AddNotification($"USB-Gerät '{busId}' wurde freigegeben.", "Success");
         });
 
-        await LoadUsbDevicesAsync(showNotification: false);
-
         try
         {
+            await LoadUsbDevicesAsync(showNotification: false);
+
             await Task.Delay(TimeSpan.FromSeconds(2), _lifetimeCancellation.Token);
+            await LoadUsbDevicesAsync(showNotification: false, useBusyIndicator: false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
             return;
         }
-
-        await LoadUsbDevicesAsync(showNotification: false, useBusyIndicator: false);
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "USB-Liste konnte nach Share nicht vollständig aktualisiert werden. BusId={BusId}", busId);
+            AddNotification("USB-Liste konnte nach Share nicht vollständig aktualisiert werden.", "Warning");
+        }
     }
 
     private async Task UnbindSelectedUsbDeviceAsync()
@@ -2307,18 +2311,22 @@ public partial class MainViewModel : ViewModelBase
             AddNotification($"USB-Freigabe für '{busId}' wurde entfernt.", "Success");
         });
 
-        await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false);
-
         try
         {
+            await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false);
+
             await Task.Delay(TimeSpan.FromSeconds(2), _lifetimeCancellation.Token);
+            await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
             return;
         }
-
-        await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "USB-Liste konnte nach Unshare nicht vollständig aktualisiert werden. BusId={BusId}", busId);
+            AddNotification("USB-Liste konnte nach Unshare nicht vollständig aktualisiert werden.", "Warning");
+        }
     }
 
     private async Task DetachSelectedUsbDeviceAsync()
@@ -3442,6 +3450,40 @@ public partial class MainViewModel : ViewModelBase
             .ToList();
     }
 
+    public IReadOnlyList<UsbDeviceHostDescriptionEntry> GetUsbDeviceDescriptionSnapshot()
+    {
+        var descriptionsByKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var device in UsbDevices)
+        {
+            var description = (device.Description ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(description))
+            {
+                continue;
+            }
+
+            foreach (var aliasKey in BuildUsbIdentityAliasKeys(device))
+            {
+                var key = (aliasKey ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(key) || descriptionsByKey.ContainsKey(key))
+                {
+                    continue;
+                }
+
+                descriptionsByKey[key] = description;
+            }
+        }
+
+        return descriptionsByKey
+            .Select(pair => new UsbDeviceHostDescriptionEntry
+            {
+                DeviceKey = pair.Key,
+                Description = pair.Value
+            })
+            .OrderBy(entry => entry.DeviceKey, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     public bool TryUpdateSelectedUsbMetadata(string? customName, string? customComment, out string message)
     {
         if (SelectedUsbDevice is null)
@@ -3778,11 +3820,63 @@ public partial class MainViewModel : ViewModelBase
             await _usbTrayRefreshGate.WaitAsync(_lifetimeCancellation.Token);
             gateEntered = true;
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
-            cts.CancelAfter(TimeSpan.FromSeconds(12));
+            var immediateDetachAttempts = Math.Clamp(_usbAutoDetachRetryAttempts, 1, 3);
+            Exception? lastDetachError = null;
+            var detached = false;
 
-            await _usbIpService.DetachAsync(normalizedBusId, cts.Token);
-            Log.Information("USB detach executed after client disconnect. BusId={BusId}", normalizedBusId);
+            for (var attempt = 1; attempt <= immediateDetachAttempts; attempt++)
+            {
+                try
+                {
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+                    cts.CancelAfter(TimeSpan.FromSeconds(12));
+
+                    await _usbIpService.DetachAsync(normalizedBusId, cts.Token);
+                    detached = true;
+                    Log.Information(
+                        "USB detach executed after client disconnect. BusId={BusId}; Attempt={Attempt}/{MaxAttempts}",
+                        normalizedBusId,
+                        attempt,
+                        immediateDetachAttempts);
+                    break;
+                }
+                catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    lastDetachError = ex;
+                    if (attempt < immediateDetachAttempts)
+                    {
+                        try
+                        {
+                            await Task.Delay(TimeSpan.FromMilliseconds(450), _lifetimeCancellation.Token);
+                        }
+                        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if (detached)
+            {
+                _usbAttachedWithoutAckSinceUtc.Remove(normalizedBusId);
+                _usbAttachedWithoutAckAttempts.Remove(normalizedBusId);
+                await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
+                return;
+            }
+
+            // Fall back to stale-ack auto-detach path with an accelerated first-seen timestamp.
+            _usbAttachedWithoutAckSinceUtc[normalizedBusId] = DateTimeOffset.UtcNow - StaleUsbAttachGracePeriod;
+            _usbAttachedWithoutAckAttempts[normalizedBusId] = Math.Max(_usbAutoDetachRetryAttempts - 1, 0);
+
+            Log.Warning(
+                lastDetachError,
+                "Automatic USB detach after client disconnect failed. Fallback stale-ack detach scheduled. BusId={BusId}",
+                normalizedBusId);
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
