@@ -23,6 +23,7 @@ public partial class MainViewModel : ViewModelBase
     private const uint KeyeventfExtendedKey = 0x0001;
     private const uint KeyeventfKeyUp = 0x0002;
     private static readonly TimeSpan StaleUsbAttachGracePeriod = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
     private static readonly TimeSpan MonitorAgentTimeout = TimeSpan.FromSeconds(5);
@@ -1983,6 +1984,17 @@ public partial class MainViewModel : ViewModelBase
                     busId,
                     attemptCount,
                     effectiveRetryAttempts);
+                continue;
+            }
+
+            // Last chance before detach: wait briefly and re-check fresh guest ACK.
+            await Task.Delay(StaleUsbAttachFinalRecheckDelay, token);
+
+            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, StaleUsbAttachGracePeriod, out _))
+            {
+                _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                _usbAttachedWithoutAckAttempts.Remove(busId);
+                Log.Debug("Skipped stale USB auto-detach after final ACK recheck. BusId={BusId}", busId);
                 continue;
             }
 
