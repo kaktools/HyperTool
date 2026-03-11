@@ -3812,14 +3812,15 @@ public sealed partial class App : Application
 
     private static string BuildUsbDeviceIdentityKey(UsbIpDeviceInfo device)
     {
+        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
+        if (!string.IsNullOrWhiteSpace(hardwareId))
+        {
+            return "hardware:" + hardwareId;
+        }
+
         if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
         {
             return "guid:" + device.PersistedGuid.Trim();
-        }
-
-        if (!string.IsNullOrWhiteSpace(device.BusId))
-        {
-            return "busid:" + device.BusId.Trim();
         }
 
         if (!string.IsNullOrWhiteSpace(device.InstanceId))
@@ -3827,9 +3828,9 @@ public sealed partial class App : Application
             return "instance:" + device.InstanceId.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(device.HardwareId))
+        if (!string.IsNullOrWhiteSpace(device.BusId))
         {
-            return "hardware:" + device.HardwareId.Trim();
+            return "busid:" + device.BusId.Trim();
         }
 
         if (!string.IsNullOrWhiteSpace(device.Description))
@@ -3842,14 +3843,15 @@ public sealed partial class App : Application
 
     private static IEnumerable<string> BuildUsbIdentityAliasKeys(UsbIpDeviceInfo device)
     {
+        var hardwareId = NormalizeUsbHardwareId(device.HardwareId);
+        if (!string.IsNullOrWhiteSpace(hardwareId))
+        {
+            yield return "hardware:" + hardwareId;
+        }
+
         if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
         {
             yield return "guid:" + device.PersistedGuid.Trim();
-        }
-
-        if (!string.IsNullOrWhiteSpace(device.BusId))
-        {
-            yield return "busid:" + device.BusId.Trim();
         }
 
         if (!string.IsNullOrWhiteSpace(device.InstanceId))
@@ -3857,9 +3859,9 @@ public sealed partial class App : Application
             yield return "instance:" + device.InstanceId.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(device.HardwareId))
+        if (!string.IsNullOrWhiteSpace(device.BusId))
         {
-            yield return "hardware:" + device.HardwareId.Trim();
+            yield return "busid:" + device.BusId.Trim();
         }
 
         if (!string.IsNullOrWhiteSpace(device.Description))
@@ -3871,6 +3873,16 @@ public sealed partial class App : Application
     private static string BuildUsbAutoConnectKey(UsbIpDeviceInfo device)
     {
         return BuildUsbDeviceIdentityKey(device);
+    }
+
+    private static string NormalizeUsbHardwareId(string? hardwareId)
+    {
+        if (string.IsNullOrWhiteSpace(hardwareId))
+        {
+            return string.Empty;
+        }
+
+        return hardwareId.Trim().ToUpperInvariant();
     }
 
     private void ApplyHostUsbMetadata(UsbIpDeviceInfo device)
@@ -4157,11 +4169,15 @@ public sealed partial class App : Application
                     ? guestNetworks[0]
                     : (string.Empty, string.Empty, string.Empty, string.Empty);
                 var (guestCpuPercent, guestRamUsedGb, guestRamTotalGb) = _diagnosticsResourceSampler.Sample();
+                var currentDevice = FindUsbByBusId(busId);
 
                 var payload = JsonSerializer.Serialize(new HyperVSocketDiagnosticsAck
                 {
                     GuestComputerName = Environment.MachineName,
                     BusId = busId.Trim(),
+                    HardwareId = currentDevice?.HardwareId,
+                    InstanceId = currentDevice?.InstanceId,
+                    PersistedGuid = currentDevice?.PersistedGuid,
                     EventType = eventType.Trim(),
                     SentAtUtc = DateTime.UtcNow.ToString("O"),
                     GuestIpv4Address = guestNetwork.Item1,

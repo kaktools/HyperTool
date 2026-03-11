@@ -2114,21 +2114,21 @@ public sealed partial class App : Application
         }
 
         if (_mainViewModel is not null
-            && !string.IsNullOrWhiteSpace(ack.BusId)
+            && (!string.IsNullOrWhiteSpace(ack.BusId) || !string.IsNullOrWhiteSpace(ack.HardwareId))
             && string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
         {
             if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
             {
-                _ = queue.TryEnqueue(() => _ = HandleUsbClientDisconnectEventAsync(ack.BusId));
+                _ = queue.TryEnqueue(() => _ = HandleUsbClientDisconnectEventAsync(ack.BusId, ack.HardwareId));
             }
             else
             {
-                _ = HandleUsbClientDisconnectEventAsync(ack.BusId);
+                _ = HandleUsbClientDisconnectEventAsync(ack.BusId, ack.HardwareId);
             }
         }
 
         if (_mainViewModel is not null
-            && !string.IsNullOrWhiteSpace(ack.BusId)
+            && (!string.IsNullOrWhiteSpace(ack.BusId) || !string.IsNullOrWhiteSpace(ack.HardwareId))
             && (string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)))
@@ -2136,33 +2136,37 @@ public sealed partial class App : Application
             TriggerHostUsbRefreshForDiagnosticsEvent();
         }
 
-        Log.Information(
-            isThemeRestart
-                ? "Hyper-V socket diagnostics acknowledged (theme restart). EventType={EventType}; BusId={BusId}; GuestComputerName={GuestComputerName}; HostComputerName={HostComputerName}; GuestHyperVSocketActive={GuestHyperVSocketActive}; GuestRegistryServiceOk={GuestRegistryServiceOk}; GuestIpv4Address={GuestIpv4Address}; GuestIpv4SubnetMask={GuestIpv4SubnetMask}; GuestIpv4Gateway={GuestIpv4Gateway}; GuestCpuPercent={GuestCpuPercent}; GuestRamUsedGb={GuestRamUsedGb}; GuestRamTotalGb={GuestRamTotalGb}; GuestSentAtUtc={GuestSentAtUtc}; UsbTunnelActive={UsbTunnelActive}; RegistryServiceOk={RegistryServiceOk}"
-                : "Hyper-V socket diagnostics acknowledged. EventType={EventType}; BusId={BusId}; GuestComputerName={GuestComputerName}; HostComputerName={HostComputerName}; GuestHyperVSocketActive={GuestHyperVSocketActive}; GuestRegistryServiceOk={GuestRegistryServiceOk}; GuestIpv4Address={GuestIpv4Address}; GuestIpv4SubnetMask={GuestIpv4SubnetMask}; GuestIpv4Gateway={GuestIpv4Gateway}; GuestCpuPercent={GuestCpuPercent}; GuestRamUsedGb={GuestRamUsedGb}; GuestRamTotalGb={GuestRamTotalGb}; GuestSentAtUtc={GuestSentAtUtc}; UsbTunnelActive={UsbTunnelActive}; RegistryServiceOk={RegistryServiceOk}",
-            ack.EventType,
-            ack.BusId,
-            ack.GuestComputerName,
-            Environment.MachineName,
-            ack.HyperVSocketActive,
-            ack.RegistryServiceOk,
-            ack.GuestIpv4Address,
-            ack.GuestIpv4SubnetMask,
-            ack.GuestIpv4Gateway,
-            ack.GuestCpuPercent,
-            ack.GuestRamUsedGb,
-            ack.GuestRamTotalGb,
-            ack.SentAtUtc,
-            _usbHostTunnel?.IsRunning == true,
-            HyperVSocketUsbHostTunnel.IsServiceRegistered());
+        if (!string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase))
+        {
+            Log.Information(
+                isThemeRestart
+                    ? "Hyper-V socket diagnostics acknowledged (theme restart). EventType={EventType}; BusId={BusId}; HardwareId={HardwareId}; GuestComputerName={GuestComputerName}; HostComputerName={HostComputerName}; GuestHyperVSocketActive={GuestHyperVSocketActive}; GuestRegistryServiceOk={GuestRegistryServiceOk}; GuestIpv4Address={GuestIpv4Address}; GuestIpv4SubnetMask={GuestIpv4SubnetMask}; GuestIpv4Gateway={GuestIpv4Gateway}; GuestCpuPercent={GuestCpuPercent}; GuestRamUsedGb={GuestRamUsedGb}; GuestRamTotalGb={GuestRamTotalGb}; GuestSentAtUtc={GuestSentAtUtc}; UsbTunnelActive={UsbTunnelActive}; RegistryServiceOk={RegistryServiceOk}"
+                    : "Hyper-V socket diagnostics acknowledged. EventType={EventType}; BusId={BusId}; HardwareId={HardwareId}; GuestComputerName={GuestComputerName}; HostComputerName={HostComputerName}; GuestHyperVSocketActive={GuestHyperVSocketActive}; GuestRegistryServiceOk={GuestRegistryServiceOk}; GuestIpv4Address={GuestIpv4Address}; GuestIpv4SubnetMask={GuestIpv4SubnetMask}; GuestIpv4Gateway={GuestIpv4Gateway}; GuestCpuPercent={GuestCpuPercent}; GuestRamUsedGb={GuestRamUsedGb}; GuestRamTotalGb={GuestRamTotalGb}; GuestSentAtUtc={GuestSentAtUtc}; UsbTunnelActive={UsbTunnelActive}; RegistryServiceOk={RegistryServiceOk}",
+                ack.EventType,
+                ack.BusId,
+                ack.HardwareId,
+                ack.GuestComputerName,
+                Environment.MachineName,
+                ack.HyperVSocketActive,
+                ack.RegistryServiceOk,
+                ack.GuestIpv4Address,
+                ack.GuestIpv4SubnetMask,
+                ack.GuestIpv4Gateway,
+                ack.GuestCpuPercent,
+                ack.GuestRamUsedGb,
+                ack.GuestRamTotalGb,
+                ack.SentAtUtc,
+                _usbHostTunnel?.IsRunning == true,
+                HyperVSocketUsbHostTunnel.IsServiceRegistered());
+        }
     }
 
-    private async Task HandleUsbClientDisconnectEventAsync(string busId)
+    private async Task HandleUsbClientDisconnectEventAsync(string? busId, string? hardwareId)
     {
         if (_mainViewModel is null
             || _isExitRequested
             || _isThemeWindowReopenInProgress
-            || string.IsNullOrWhiteSpace(busId))
+            || (string.IsNullOrWhiteSpace(busId) && string.IsNullOrWhiteSpace(hardwareId)))
         {
             return;
         }
@@ -2174,7 +2178,7 @@ public sealed partial class App : Application
                 {
                     try
                     {
-                        await HandleUsbClientDisconnectEventAsync(busId);
+                        await HandleUsbClientDisconnectEventAsync(busId, hardwareId);
                         completion.TrySetResult(true);
                     }
                     catch (Exception ex)
@@ -2192,11 +2196,11 @@ public sealed partial class App : Application
 
         try
         {
-            await _mainViewModel.HandleUsbClientDisconnectedAsync(busId);
+            await _mainViewModel.HandleUsbClientDisconnectedAsync(busId ?? string.Empty, hardwareId);
         }
         catch (Exception ex)
         {
-            Log.Debug(ex, "Automatic host detach on usb-disconnected event failed. BusId={BusId}", busId);
+            Log.Debug(ex, "Automatic host detach on usb-disconnected event failed. BusId={BusId}; HardwareId={HardwareId}", busId, hardwareId);
         }
     }
 

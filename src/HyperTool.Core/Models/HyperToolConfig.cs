@@ -87,6 +87,8 @@ public sealed class UsbSettings
     public List<string> AutoShareDeviceKeys { get; set; } = [];
 
     public List<UsbDeviceMetadataEntry> DeviceMetadata { get; set; } = [];
+
+    public bool HardwareIdentityMigrationCompleted { get; set; }
 }
 
 public sealed class SharedFolderSettings

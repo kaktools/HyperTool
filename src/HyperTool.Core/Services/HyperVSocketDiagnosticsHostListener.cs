@@ -136,6 +136,9 @@ public sealed class HyperVSocketDiagnosticsHostListener : IDisposable
                         HyperVSocketActive = GetJsonBool(root, "hyperVSocketActive"),
                         RegistryServiceOk = GetJsonBool(root, "registryServiceOk"),
                         BusId = GetJsonString(root, "busId"),
+                        HardwareId = GetJsonString(root, "hardwareId"),
+                        InstanceId = GetJsonString(root, "instanceId"),
+                        PersistedGuid = GetJsonString(root, "persistedGuid"),
                         EventType = GetJsonString(root, "eventType"),
                         SentAtUtc = GetJsonString(root, "sentAtUtc"),
                         GuestIpv4Address = GetJsonString(root, "guestIpv4Address"),
@@ -345,6 +348,12 @@ public sealed class HyperVSocketDiagnosticsAck
     public bool? RegistryServiceOk { get; set; }
 
     public string? BusId { get; set; }
+
+    public string? HardwareId { get; set; }
+
+    public string? InstanceId { get; set; }
+
+    public string? PersistedGuid { get; set; }
 
     public string? EventType { get; set; }
 

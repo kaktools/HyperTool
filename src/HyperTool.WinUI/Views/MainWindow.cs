@@ -5520,6 +5520,12 @@ public sealed class MainWindow : Window
             {
                 target = _viewModel.UsbDevices.FirstOrDefault(device => ReferenceEquals(device, selected));
 
+                if (target is null && !string.IsNullOrWhiteSpace(selected.HardwareId))
+                {
+                    target = _viewModel.UsbDevices.FirstOrDefault(device =>
+                        string.Equals(device.HardwareId?.Trim(), selected.HardwareId?.Trim(), StringComparison.OrdinalIgnoreCase));
+                }
+
                 if (target is null && !string.IsNullOrWhiteSpace(selected.BusId))
                 {
                     target = _viewModel.UsbDevices.FirstOrDefault(device =>
