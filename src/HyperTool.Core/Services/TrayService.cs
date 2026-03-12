@@ -282,11 +282,18 @@ public sealed class TrayService : ITrayService
         var selectedUsbDevice = _getSelectedUsbDevice?.Invoke();
         var selectedBusId = selectedUsbDevice?.BusId?.Trim() ?? string.Empty;
         var hasSelectedBusId = !string.IsNullOrWhiteSpace(selectedBusId);
-        var selectedDeviceName = selectedUsbDevice?.Description?.Trim() ?? string.Empty;
+        var selectedDeviceName = selectedUsbDevice is null
+            ? string.Empty
+            : (string.IsNullOrWhiteSpace(selectedUsbDevice.CustomName)
+                ? selectedUsbDevice.Description?.Trim() ?? string.Empty
+                : selectedUsbDevice.CustomName.Trim());
+        var selectedCommentSuffix = string.IsNullOrWhiteSpace(selectedUsbDevice?.CustomComment)
+            ? string.Empty
+            : $" ({selectedUsbDevice!.CustomComment.Trim()})";
         var selectedDeviceNameShort = TruncateWithEllipsis(selectedDeviceName, 42);
         var selectedStateText = selectedUsbDevice?.IsShared == true ? "Shared" : "Not shared";
         var selectedText = hasSelectedBusId
-            ? $"Selected: {(string.IsNullOrWhiteSpace(selectedDeviceNameShort) ? "-" : selectedDeviceNameShort)} ({selectedStateText})"
+            ? $"Selected: {(string.IsNullOrWhiteSpace(selectedDeviceNameShort) ? "-" : selectedDeviceNameShort)}{selectedCommentSuffix} ({selectedStateText})"
             : "Selected: -";
 
         usbMenu.DropDownItems.Add(new ToolStripMenuItem(selectedText)

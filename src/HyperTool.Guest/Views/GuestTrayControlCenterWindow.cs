@@ -33,6 +33,7 @@ internal sealed class GuestTrayControlCenterWindow : Window
 
     private bool _isUpdatingUsbSelection;
     private bool _isTrayMenuEnabled = true;
+    private string? _lastUsbRenderKey;
     private SizeInt32 _currentScaledPanelSize;
 
     public event Action? CloseRequested;
@@ -120,27 +121,45 @@ internal sealed class GuestTrayControlCenterWindow : Window
         _isTrayMenuEnabled = isTrayMenuEnabled;
         _usbCard.Visibility = isTrayMenuEnabled ? Visibility.Visible : Visibility.Collapsed;
 
-        _isUpdatingUsbSelection = true;
-        try
+        var usbRenderKey = string.Join('|', devices.Select(device => $"{device.BusId}:{device.DisplayName}:{device.CustomComment}"));
+        if (!string.Equals(_lastUsbRenderKey, usbRenderKey, StringComparison.Ordinal))
         {
-            _usbDeviceCombo.Items.Clear();
-            foreach (var usb in devices)
-            {
-                _usbDeviceCombo.Items.Add(new ComboBoxItem
-                {
-                    Content = usb.DisplayName,
-                    Tag = usb.BusId
-                });
-            }
+            _lastUsbRenderKey = usbRenderKey;
 
-            var selectedIndex = devices.ToList().FindIndex(item => string.Equals(item.BusId, selectedBusId, StringComparison.OrdinalIgnoreCase));
-            _usbDeviceCombo.SelectedIndex = selectedIndex;
-            _usbDeviceCombo.IsEnabled = isUsbClientAvailable && devices.Count > 0;
+            _isUpdatingUsbSelection = true;
+            try
+            {
+                _usbDeviceCombo.Items.Clear();
+                foreach (var usb in devices)
+                {
+                    _usbDeviceCombo.Items.Add(new ComboBoxItem
+                    {
+                        Content = BuildUsbComboLabel(usb),
+                        Tag = usb.BusId
+                    });
+                }
+            }
+            finally
+            {
+                _isUpdatingUsbSelection = false;
+            }
         }
-        finally
+
+        var selectedIndex = devices.ToList().FindIndex(item => string.Equals(item.BusId, selectedBusId, StringComparison.OrdinalIgnoreCase));
+        if (_usbDeviceCombo.SelectedIndex != selectedIndex)
         {
-            _isUpdatingUsbSelection = false;
+            _isUpdatingUsbSelection = true;
+            try
+            {
+                _usbDeviceCombo.SelectedIndex = selectedIndex;
+            }
+            finally
+            {
+                _isUpdatingUsbSelection = false;
+            }
         }
+
+        _usbDeviceCombo.IsEnabled = isUsbClientAvailable && devices.Count > 0;
 
         var hasSelection = !string.IsNullOrWhiteSpace(selectedBusId);
         _refreshButton.IsEnabled = isTrayMenuEnabled && isUsbClientAvailable;
@@ -149,6 +168,23 @@ internal sealed class GuestTrayControlCenterWindow : Window
         _visibilityButton.Content = isMainWindowVisible ? "⌂  Ausblenden" : "⌂  Einblenden";
 
         SetPanelSize(PopupWidth, isTrayMenuEnabled ? PopupHeightWithUsb : PopupHeightCompact);
+    }
+
+    private static string BuildUsbComboLabel(UsbIpDeviceInfo usb)
+    {
+        var label = usb.DisplayName;
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            label = "USB-Gerät";
+        }
+
+        if (!string.IsNullOrWhiteSpace(usb.CustomComment)
+            && !label.Contains($"({usb.CustomComment.Trim()}", StringComparison.OrdinalIgnoreCase))
+        {
+            label = $"{label} ({usb.CustomComment.Trim()})";
+        }
+
+        return label;
     }
 
     private void BuildLayout()

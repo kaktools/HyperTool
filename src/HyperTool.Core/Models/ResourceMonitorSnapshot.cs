@@ -4,7 +4,7 @@ public sealed class VmResourceMonitorSnapshot
 {
     public string VmName { get; set; } = string.Empty;
 
-    public string State { get; set; } = "OFF";
+    public string State { get; set; } = "Guest nicht erreichbar";
 
     public double CpuPercent { get; set; }
 

@@ -1,9 +1,14 @@
 using System.Runtime.InteropServices;
+using System.Management;
+using System.Diagnostics;
 
 namespace HyperTool.Services;
 
 public sealed class SystemResourceSampler
 {
+    private readonly object _cpuCounterLock = new();
+    private PerformanceCounter? _cpuUtilityCounter;
+    private bool _cpuUtilityCounterPrimed;
     private ulong _previousIdle;
     private ulong _previousKernel;
     private ulong _previousUser;
@@ -18,6 +23,16 @@ public sealed class SystemResourceSampler
 
     private double SampleCpuPercent()
     {
+        if (TrySampleCpuPercentFromProcessorUtilityCounter(out var utilityCpuPercent))
+        {
+            return utilityCpuPercent;
+        }
+
+        if (TrySampleCpuPercentFromWmi(out var wmiCpuPercent))
+        {
+            return wmiCpuPercent;
+        }
+
         if (!GetSystemTimes(out var idleTime, out var kernelTime, out var userTime))
         {
             return 0;
@@ -26,6 +41,15 @@ public sealed class SystemResourceSampler
         var idle = FileTimeToUInt64(idleTime);
         var kernel = FileTimeToUInt64(kernelTime);
         var user = FileTimeToUInt64(userTime);
+
+        if (_hasPrevious
+            && (idle < _previousIdle || kernel < _previousKernel || user < _previousUser))
+        {
+            _previousIdle = idle;
+            _previousKernel = kernel;
+            _previousUser = user;
+            return 0;
+        }
 
         if (!_hasPrevious)
         {
@@ -50,9 +74,83 @@ public sealed class SystemResourceSampler
             return 0;
         }
 
+        if (idleDelta >= totalDelta)
+        {
+            return 0;
+        }
+
         var busy = totalDelta - idleDelta;
         var percent = (double)busy / totalDelta * 100d;
         return Math.Clamp(percent, 0d, 100d);
+    }
+
+    private bool TrySampleCpuPercentFromProcessorUtilityCounter(out double cpuPercent)
+    {
+        cpuPercent = 0d;
+
+        try
+        {
+            lock (_cpuCounterLock)
+            {
+                _cpuUtilityCounter ??= new PerformanceCounter("Processor Information", "% Processor Utility", "_Total", true);
+
+                if (!_cpuUtilityCounterPrimed)
+                {
+                    _ = _cpuUtilityCounter.NextValue();
+                    _cpuUtilityCounterPrimed = true;
+                    return false;
+                }
+
+                var sampled = _cpuUtilityCounter.NextValue();
+                if (float.IsNaN(sampled) || float.IsInfinity(sampled))
+                {
+                    return false;
+                }
+
+                cpuPercent = Math.Clamp(Math.Round(sampled, 2), 0d, 100d);
+                return true;
+            }
+        }
+        catch
+        {
+        }
+
+        return false;
+    }
+
+    private static bool TrySampleCpuPercentFromWmi(out double cpuPercent)
+    {
+        cpuPercent = 0d;
+
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "root\\CIMV2",
+                "SELECT Name, PercentProcessorTime FROM Win32_PerfFormattedData_PerfOS_Processor WHERE Name = '_Total'");
+
+            foreach (ManagementObject obj in searcher.Get())
+            {
+                var rawValue = obj["PercentProcessorTime"];
+                if (rawValue is null)
+                {
+                    continue;
+                }
+
+                var parsed = Convert.ToDouble(rawValue);
+                if (double.IsNaN(parsed) || double.IsInfinity(parsed))
+                {
+                    continue;
+                }
+
+                cpuPercent = Math.Clamp(parsed, 0d, 100d);
+                return true;
+            }
+        }
+        catch
+        {
+        }
+
+        return false;
     }
 
     private static (double RamUsedGb, double RamTotalGb) SampleMemoryGb()

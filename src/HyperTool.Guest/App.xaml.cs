@@ -1436,17 +1436,6 @@ public sealed partial class App : Application
             var exitAnimationStopwatch = Stopwatch.StartNew();
             const int inlineExitAnimationDurationMs = 2000;
 
-            if (_mainWindow is not null)
-            {
-                try
-                {
-                    await _mainWindow.PlayExitAnimationAsync();
-                }
-                catch
-                {
-                }
-            }
-
             _isExitRequested = true;
 
             _trayControlCenterWindow?.Close();
@@ -1457,7 +1446,19 @@ public sealed partial class App : Application
             StopSharedFolderAutoMountLoop();
             StopResourceMonitorAgent();
 
+            // Run USB detach first to maximize successful host cleanup during OS shutdown.
             await DisconnectAllAttachedUsbOnExitAsync();
+
+            if (_mainWindow is not null)
+            {
+                try
+                {
+                    await _mainWindow.PlayExitAnimationAsync();
+                }
+                catch
+                {
+                }
+            }
 
             _usbHyperVSocketProxy?.Dispose();
             _usbHyperVSocketProxy = null;
@@ -1967,6 +1968,16 @@ public sealed partial class App : Application
 
     private UsbIpDeviceInfo? GetSelectedUsbDevice()
     {
+        if (!string.IsNullOrWhiteSpace(_selectedUsbBusId))
+        {
+            var selectedFromTray = _usbDevices.FirstOrDefault(item =>
+                string.Equals(item.BusId, _selectedUsbBusId, StringComparison.OrdinalIgnoreCase));
+            if (selectedFromTray is not null)
+            {
+                return selectedFromTray;
+            }
+        }
+
         var selectedFromMain = _mainWindow?.GetSelectedUsbDevice();
         if (selectedFromMain is not null)
         {
@@ -1974,12 +1985,7 @@ public sealed partial class App : Application
             return selectedFromMain;
         }
 
-        if (string.IsNullOrWhiteSpace(_selectedUsbBusId))
-        {
-            return null;
-        }
-
-        return _usbDevices.FirstOrDefault(item => string.Equals(item.BusId, _selectedUsbBusId, StringComparison.OrdinalIgnoreCase));
+        return null;
     }
 
     private void UpdateUsbViews()
@@ -2768,9 +2774,14 @@ public sealed partial class App : Application
         }
     }
 
-    private async Task<int> DisconnectUsbAsync(string busId)
+    private Task<int> DisconnectUsbAsync(string busId)
     {
-        if (_config?.Usb?.HostFeatureEnabled == false)
+        return DisconnectUsbAsync(busId, bypassHostFeaturePolicy: false);
+    }
+
+    private async Task<int> DisconnectUsbAsync(string busId, bool bypassHostFeaturePolicy)
+    {
+        if (!bypassHostFeaturePolicy && _config?.Usb?.HostFeatureEnabled == false)
         {
             GuestLogger.Warn("usb.disconnect.blocked_host_policy", "USB Disconnect blockiert: Host hat USB Share deaktiviert.", new
             {
@@ -3139,7 +3150,7 @@ public sealed partial class App : Application
         {
             try
             {
-                var result = await DisconnectUsbAsync(busId);
+                var result = await DisconnectUsbAsync(busId, bypassHostFeaturePolicy: true);
                 if (result == 0)
                 {
                     disconnectedCount++;

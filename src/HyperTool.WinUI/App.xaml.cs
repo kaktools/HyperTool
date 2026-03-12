@@ -3332,8 +3332,7 @@ public sealed partial class App : Application
                 }
 
                 var (cpu, ramUsed, ramTotal) = _hostResourceSampler.Sample();
-                _mainViewModel.UpdateHostResourceMonitoring(cpu, ramUsed, ramTotal);
-                _mainViewModel.ReconcileVmMonitoringRuntimeStates();
+                await ApplyResourceMonitorSampleAsync(cpu, ramUsed, ramTotal, token);
 
                 await Task.Delay(TimeSpan.FromMilliseconds(Math.Clamp(_mainViewModel.MonitoringIntervalMs, 500, 5000)), token);
             }
@@ -3343,6 +3342,7 @@ public sealed partial class App : Application
             }
             catch
             {
+                Log.Debug("Resource monitor loop cycle failed; retry scheduled.");
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(2), token);
@@ -3353,6 +3353,44 @@ public sealed partial class App : Application
                 }
             }
         }
+    }
+
+    private async Task ApplyResourceMonitorSampleAsync(double cpu, double ramUsed, double ramTotal, CancellationToken token)
+    {
+        if (_mainViewModel is null)
+        {
+            return;
+        }
+
+        var uiQueue = _mainWindow?.DispatcherQueue;
+        if (uiQueue is null || uiQueue.HasThreadAccess)
+        {
+            _mainViewModel.UpdateHostResourceMonitoring(cpu, ramUsed, ramTotal);
+            _mainViewModel.ReconcileVmMonitoringRuntimeStates();
+            return;
+        }
+
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!uiQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                _mainViewModel.UpdateHostResourceMonitoring(cpu, ramUsed, ramTotal);
+                _mainViewModel.ReconcileVmMonitoringRuntimeStates();
+                tcs.TrySetResult(true);
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        }))
+        {
+            _mainViewModel.UpdateHostResourceMonitoring(cpu, ramUsed, ramTotal);
+            _mainViewModel.ReconcileVmMonitoringRuntimeStates();
+            return;
+        }
+
+        await tcs.Task.WaitAsync(token);
     }
 
     private void OnSharedFolderFileServiceRequestServed(DateTimeOffset servedAtUtc)

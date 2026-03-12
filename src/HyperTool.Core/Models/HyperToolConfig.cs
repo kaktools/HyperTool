@@ -82,6 +82,10 @@ public sealed class UsbSettings
 
     public int AutoDetachRetryAttempts { get; set; } = 3;
 
+    public int AutoDetachGracePeriodSeconds { get; set; } = 90;
+
+    public int AutoDetachRetryDelayMs { get; set; } = 450;
+
     public bool UnshareOnExit { get; set; } = true;
 
     public List<string> AutoShareDeviceKeys { get; set; } = [];

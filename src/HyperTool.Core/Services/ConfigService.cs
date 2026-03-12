@@ -299,6 +299,22 @@ public sealed class ConfigService : IConfigService
             notices.Add("Usb.AutoDetachRetryAttempts war außerhalb des gültigen Bereichs und wurde korrigiert (1-10).");
         }
 
+        var normalizedAutoDetachGracePeriodSeconds = Math.Clamp(config.Usb.AutoDetachGracePeriodSeconds, 5, 300);
+        if (config.Usb.AutoDetachGracePeriodSeconds != normalizedAutoDetachGracePeriodSeconds)
+        {
+            config.Usb.AutoDetachGracePeriodSeconds = normalizedAutoDetachGracePeriodSeconds;
+            wasUpdated = true;
+            notices.Add("Usb.AutoDetachGracePeriodSeconds war außerhalb des gültigen Bereichs und wurde korrigiert (5-300).");
+        }
+
+        var normalizedAutoDetachRetryDelayMs = Math.Clamp(config.Usb.AutoDetachRetryDelayMs, 100, 5000);
+        if (config.Usb.AutoDetachRetryDelayMs != normalizedAutoDetachRetryDelayMs)
+        {
+            config.Usb.AutoDetachRetryDelayMs = normalizedAutoDetachRetryDelayMs;
+            wasUpdated = true;
+            notices.Add("Usb.AutoDetachRetryDelayMs war außerhalb des gültigen Bereichs und wurde korrigiert (100-5000).");
+        }
+
         if (config.SharedFolders.HostDefinitions is null)
         {
             config.SharedFolders.HostDefinitions = [];

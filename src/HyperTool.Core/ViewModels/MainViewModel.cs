@@ -22,7 +22,7 @@ public partial class MainViewModel : ViewModelBase
     private const int VkNumLock = 0x90;
     private const uint KeyeventfExtendedKey = 0x0001;
     private const uint KeyeventfKeyUp = 0x0002;
-    private static readonly TimeSpan StaleUsbAttachGracePeriod = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan DefaultStaleUsbAttachGracePeriod = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan UsbMetadataBusAliasTtl = TimeSpan.FromMinutes(3);
@@ -452,10 +452,14 @@ public partial class MainViewModel : ViewModelBase
     private static readonly HttpClient UpdateDownloadClient = new();
     private int _uiNumLockWatcherIntervalSeconds = 30;
     private int _usbAutoDetachRetryAttempts = DefaultStaleUsbDetachRetryThreshold;
+    private TimeSpan _usbAutoDetachGracePeriod = DefaultStaleUsbAttachGracePeriod;
+    private TimeSpan _usbAutoDetachRetryDelay = TimeSpan.FromMilliseconds(450);
     private bool _monitorEnabled = true;
     private int _monitorIntervalMs = 1000;
     private int _monitorHistoryMinutes = 5;
     private int _monitorHistorySize = 300;
+    private readonly SystemResourceSampler _resourceMonitorHostSampler = new();
+    private DateTimeOffset _lastHostResourceSampleUtc = DateTimeOffset.MinValue;
     private double _hostCpuPercent;
     private double _hostRamUsedGb;
     private double _hostRamTotalGb;
@@ -464,7 +468,7 @@ public partial class MainViewModel : ViewModelBase
     {
         public string VmName { get; set; } = string.Empty;
 
-        public string State { get; set; } = "OFF";
+        public string State { get; set; } = "Guest nicht erreichbar";
 
         public double CpuPercent { get; set; }
 
@@ -539,6 +543,8 @@ public partial class MainViewModel : ViewModelBase
         HostUsbSharingEnabled = configResult.Config.Usb.Enabled;
         UsbAutoDetachOnClientDisconnect = configResult.Config.Usb.AutoDetachOnClientDisconnect;
         _usbAutoDetachRetryAttempts = Math.Clamp(configResult.Config.Usb.AutoDetachRetryAttempts, 1, 10);
+        _usbAutoDetachGracePeriod = TimeSpan.FromSeconds(Math.Clamp(configResult.Config.Usb.AutoDetachGracePeriodSeconds, 5, 300));
+        _usbAutoDetachRetryDelay = TimeSpan.FromMilliseconds(Math.Clamp(configResult.Config.Usb.AutoDetachRetryDelayMs, 100, 5000));
         UsbUnshareOnExit = configResult.Config.Usb.UnshareOnExit;
         _monitorEnabled = configResult.Config.Monitoring.Enabled;
         _monitorIntervalMs = configResult.Config.Monitoring.IntervalMs;
@@ -1881,6 +1887,12 @@ public partial class MainViewModel : ViewModelBase
 
                 if (UsbAutoDetachOnClientDisconnect)
                 {
+                    var detachedNoVmCount = await TryDetachLoopbackAttachedDevicesWhenNoVmRunningAsync(devices, token);
+                    if (detachedNoVmCount > 0)
+                    {
+                        devices = await _usbIpService.GetDevicesAsync(token);
+                    }
+
                     var detachedStaleCount = await TryDetachStaleAttachedDevicesWithoutGuestAckAsync(devices, token);
                     if (detachedStaleCount > 0)
                     {
@@ -1926,7 +1938,7 @@ public partial class MainViewModel : ViewModelBase
 
                 if (device.IsAttached
                     && !string.IsNullOrWhiteSpace(device.BusId)
-                    && UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device.BusId, StaleUsbAttachGracePeriod, out var guestComputerName))
+                    && UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device.BusId, _usbAutoDetachGracePeriod, out var guestComputerName))
                 {
                     device.AttachedGuestComputerName = guestComputerName;
                 }
@@ -2003,7 +2015,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var removedSharedDevices = previousDevices
-            .Where(device => device is not null && device.IsShared)
+            .Where(device => device is not null && (device.IsShared || device.IsAttached))
             .Where(device =>
             {
                 var identityKeys = BuildUsbIdentityAliasKeys(device)
@@ -2112,7 +2124,7 @@ public partial class MainViewModel : ViewModelBase
             var loopbackAttached = string.Equals(device.ClientIpAddress?.Trim(), HyperVSocketUsbTunnelDefaults.LoopbackAddress, StringComparison.OrdinalIgnoreCase);
             var guestManaged = _usbGuestManagedBusIds.Contains(busId);
 
-            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, StaleUsbAttachGracePeriod, out _))
+            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, _usbAutoDetachGracePeriod, out _))
             {
                 _usbGuestManagedBusIds.Add(busId);
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
@@ -2135,7 +2147,7 @@ public partial class MainViewModel : ViewModelBase
                 continue;
             }
 
-            if ((now - firstSeenUtc) < StaleUsbAttachGracePeriod)
+            if ((now - firstSeenUtc) < _usbAutoDetachGracePeriod)
             {
                 continue;
             }
@@ -2162,7 +2174,7 @@ public partial class MainViewModel : ViewModelBase
             // Last chance before detach: wait briefly and re-check fresh guest ACK.
             await Task.Delay(StaleUsbAttachFinalRecheckDelay, token);
 
-            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, StaleUsbAttachGracePeriod, out _))
+            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, _usbAutoDetachGracePeriod, out _))
             {
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
                 _usbAttachedWithoutAckAttempts.Remove(busId);
@@ -2186,6 +2198,70 @@ public partial class MainViewModel : ViewModelBase
             {
                 Log.Debug(ex, "Stale attached USB auto-detach failed. BusId={BusId}", busId);
             }
+        }
+
+        return detachedCount;
+    }
+
+    private async Task<int> TryDetachLoopbackAttachedDevicesWhenNoVmRunningAsync(IReadOnlyList<UsbIpDeviceInfo> devices, CancellationToken token)
+    {
+        if (devices.Count == 0)
+        {
+            return 0;
+        }
+
+        var loopbackAttachedBusIds = devices
+            .Where(device => device.IsAttached
+                             && !string.IsNullOrWhiteSpace(device.BusId)
+                             && string.Equals(device.ClientIpAddress?.Trim(), HyperVSocketUsbTunnelDefaults.LoopbackAddress, StringComparison.OrdinalIgnoreCase))
+            .Select(device => device.BusId.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (loopbackAttachedBusIds.Count == 0)
+        {
+            return 0;
+        }
+
+        var anyVmRunning = false;
+        try
+        {
+            var runtimeVms = await _hyperVService.GetVmsAsync(token);
+            anyVmRunning = runtimeVms.Any(vm => IsRunningState(vm.State));
+            UpdateVmRuntimeStates(runtimeVms);
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Could not refresh VM runtime states before loopback USB detach fallback.");
+            anyVmRunning = AvailableVms.Any(vm => IsRunningState(vm.RuntimeState));
+        }
+
+        if (anyVmRunning)
+        {
+            return 0;
+        }
+
+        var detachedCount = 0;
+        foreach (var busId in loopbackAttachedBusIds)
+        {
+            try
+            {
+                await _usbIpService.DetachAsync(busId, token);
+                _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                _usbAttachedWithoutAckAttempts.Remove(busId);
+                _usbForceDetachFallbackBusIds.Remove(busId);
+                _usbGuestManagedBusIds.Remove(busId);
+                detachedCount++;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Loopback USB detach fallback on VM shutdown failed. BusId={BusId}", busId);
+            }
+        }
+
+        if (detachedCount > 0)
+        {
+            Log.Information("Detached loopback-attached USB devices because no VM is running. Count={Count}", detachedCount);
         }
 
         return detachedCount;
@@ -3177,6 +3253,18 @@ public partial class MainViewModel : ViewModelBase
             .GroupBy(vm => vm.Name, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First().OpenConsoleWithSessionEdit, StringComparer.OrdinalIgnoreCase);
 
+        var monitorStateByName = AvailableVms
+            .GroupBy(vm => vm.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().MonitorStateText, StringComparer.OrdinalIgnoreCase);
+
+        var monitorCpuByName = AvailableVms
+            .GroupBy(vm => vm.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().MonitorCpuText, StringComparer.OrdinalIgnoreCase);
+
+        var monitorRamByName = AvailableVms
+            .GroupBy(vm => vm.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().MonitorRamText, StringComparer.OrdinalIgnoreCase);
+
         var selectedName = SelectedVm?.Name;
         var defaultName = DefaultVmName;
 
@@ -3191,7 +3279,16 @@ public partial class MainViewModel : ViewModelBase
                 HasMountedIso = vm.HasMountedIso,
                 MountedIsoPath = vm.MountedIsoPath,
                 TrayAdapterName = trayAdapterByName.TryGetValue(vm.Name, out var trayAdapter) ? trayAdapter : string.Empty,
-                OpenConsoleWithSessionEdit = sessionEditByName.TryGetValue(vm.Name, out var openWithSessionEdit) && openWithSessionEdit
+                OpenConsoleWithSessionEdit = sessionEditByName.TryGetValue(vm.Name, out var openWithSessionEdit) && openWithSessionEdit,
+                MonitorStateText = monitorStateByName.TryGetValue(vm.Name, out var monitorState) && !string.IsNullOrWhiteSpace(monitorState)
+                    ? monitorState
+                    : "Guest nicht erreichbar",
+                MonitorCpuText = monitorCpuByName.TryGetValue(vm.Name, out var monitorCpu) && !string.IsNullOrWhiteSpace(monitorCpu)
+                    ? monitorCpu
+                    : "CPU -",
+                MonitorRamText = monitorRamByName.TryGetValue(vm.Name, out var monitorRam) && !string.IsNullOrWhiteSpace(monitorRam)
+                    ? monitorRam
+                    : "RAM -"
             })
             .ToList();
 
@@ -3795,6 +3892,8 @@ public partial class MainViewModel : ViewModelBase
                     Enabled = HostUsbSharingEnabled,
                     AutoDetachOnClientDisconnect = UsbAutoDetachOnClientDisconnect,
                     AutoDetachRetryAttempts = Math.Clamp(_usbAutoDetachRetryAttempts, 1, 10),
+                    AutoDetachGracePeriodSeconds = Math.Clamp((int)Math.Round(_usbAutoDetachGracePeriod.TotalSeconds), 5, 300),
+                    AutoDetachRetryDelayMs = Math.Clamp((int)Math.Round(_usbAutoDetachRetryDelay.TotalMilliseconds), 100, 5000),
                     UnshareOnExit = UsbUnshareOnExit,
                     AutoShareDeviceKeys = _usbAutoShareDeviceKeys
                         .OrderBy(key => key, StringComparer.OrdinalIgnoreCase)
@@ -4134,11 +4233,30 @@ public partial class MainViewModel : ViewModelBase
         device.CustomName = normalizedName;
         device.CustomComment = normalizedComment;
 
-        if (ReferenceEquals(SelectedUsbDevice, device))
+        foreach (var runtimeDevice in UsbDevices)
         {
-            SelectedUsbDevice.DeviceIdentityKey = key;
-            SelectedUsbDevice.CustomName = normalizedName;
-            SelectedUsbDevice.CustomComment = normalizedComment;
+            var runtimeKey = BuildUsbDeviceIdentityKey(runtimeDevice);
+            if (!string.IsNullOrWhiteSpace(runtimeKey)
+                && string.Equals(runtimeKey, key, StringComparison.OrdinalIgnoreCase))
+            {
+                runtimeDevice.DeviceIdentityKey = key;
+                runtimeDevice.CustomName = normalizedName;
+                runtimeDevice.CustomComment = normalizedComment;
+            }
+        }
+
+        var selectedDevice = SelectedUsbDevice;
+        var selectedIdentityKey = selectedDevice is null
+            ? string.Empty
+            : BuildUsbDeviceIdentityKey(selectedDevice);
+        if (selectedDevice is not null
+            && (ReferenceEquals(selectedDevice, device)
+            || (!string.IsNullOrWhiteSpace(selectedIdentityKey)
+                && string.Equals(selectedIdentityKey, key, StringComparison.OrdinalIgnoreCase))))
+        {
+            selectedDevice.DeviceIdentityKey = key;
+            selectedDevice.CustomName = normalizedName;
+            selectedDevice.CustomComment = normalizedComment;
         }
 
         PersistUsbAutoShareConfig();
@@ -4291,7 +4409,9 @@ public partial class MainViewModel : ViewModelBase
             InstanceId = SelectedUsbDevice.InstanceId,
             PersistedGuid = SelectedUsbDevice.PersistedGuid,
             ClientIpAddress = SelectedUsbDevice.ClientIpAddress,
-            AttachedGuestComputerName = SelectedUsbDevice.AttachedGuestComputerName
+            AttachedGuestComputerName = SelectedUsbDevice.AttachedGuestComputerName,
+            CustomName = SelectedUsbDevice.CustomName,
+            CustomComment = SelectedUsbDevice.CustomComment
         };
     }
 
@@ -4312,7 +4432,9 @@ public partial class MainViewModel : ViewModelBase
                 InstanceId = device.InstanceId,
                 PersistedGuid = device.PersistedGuid,
                 ClientIpAddress = device.ClientIpAddress,
-                AttachedGuestComputerName = device.AttachedGuestComputerName
+                AttachedGuestComputerName = device.AttachedGuestComputerName,
+                CustomName = device.CustomName,
+                CustomComment = device.CustomComment
             })
             .ToList();
     }
@@ -4616,7 +4738,7 @@ public partial class MainViewModel : ViewModelBase
                     {
                         try
                         {
-                            await Task.Delay(TimeSpan.FromMilliseconds(450), _lifetimeCancellation.Token);
+                            await Task.Delay(_usbAutoDetachRetryDelay, _lifetimeCancellation.Token);
                         }
                         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
                         {
@@ -4663,7 +4785,7 @@ public partial class MainViewModel : ViewModelBase
             }
 
             // Fall back to stale-ack auto-detach path with an accelerated first-seen timestamp.
-            _usbAttachedWithoutAckSinceUtc[normalizedBusId] = DateTimeOffset.UtcNow - StaleUsbAttachGracePeriod;
+            _usbAttachedWithoutAckSinceUtc[normalizedBusId] = DateTimeOffset.UtcNow - _usbAutoDetachGracePeriod;
             _usbAttachedWithoutAckAttempts[normalizedBusId] = Math.Max(_usbAutoDetachRetryAttempts - 1, 0);
             _usbForceDetachFallbackBusIds.Add(normalizedBusId);
             _usbGuestManagedBusIds.Add(normalizedBusId);
@@ -5069,6 +5191,7 @@ public partial class MainViewModel : ViewModelBase
             _hostCpuPercent = Math.Clamp(cpuPercent, 0d, 100d);
             _hostRamUsedGb = Math.Max(0d, ramUsedGb);
             _hostRamTotalGb = Math.Max(0d, ramTotalGb);
+            _lastHostResourceSampleUtc = DateTimeOffset.UtcNow;
 
             EnqueueHistory(_hostCpuHistory, _hostCpuPercent);
             var pressure = _hostRamTotalGb <= 0 ? 0 : (_hostRamUsedGb / _hostRamTotalGb) * 100d;
@@ -5171,33 +5294,63 @@ public partial class MainViewModel : ViewModelBase
     {
         lock (_resourceMonitorSync)
         {
-            var vmStates = AvailableVms
-                .Select(vm =>
-                {
-                    if (!_vmMonitorStates.TryGetValue(vm.Name, out var state))
+            EnsureFreshHostResourceSampleIfNeeded();
+
+            List<VmResourceMonitorSnapshot> vmStates;
+            try
+            {
+                vmStates = AvailableVms
+                    .Select(vm =>
                     {
-                        state = new VmResourceMonitorRuntimeState
+                        if (!_vmMonitorStates.TryGetValue(vm.Name, out var state))
                         {
-                            VmName = vm.Name,
-                            State = "Guest nicht erreichbar"
+                            state = new VmResourceMonitorRuntimeState
+                            {
+                                VmName = vm.Name,
+                                State = "Guest nicht erreichbar"
+                            };
+                        }
+
+                        var pressure = state.RamTotalGb <= 0 ? 0 : (state.RamUsedGb / state.RamTotalGb) * 100d;
+
+                        return new VmResourceMonitorSnapshot
+                        {
+                            VmName = vm.DisplayLabel,
+                            State = state.State,
+                            CpuPercent = state.CpuPercent,
+                            RamUsedGb = state.RamUsedGb,
+                            RamTotalGb = state.RamTotalGb,
+                            RamPressurePercent = Math.Clamp(pressure, 0d, 100d),
+                            CpuHistory = state.CpuHistory.ToArray(),
+                            RamPressureHistory = state.RamPressureHistory.ToArray()
                         };
-                    }
+                    })
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                // Keep host metrics live even if VM collection changes concurrently during a snapshot tick.
+                Log.Debug(ex, "Resource monitor snapshot VM projection failed; using VM monitor-state fallback.");
 
-                    var pressure = state.RamTotalGb <= 0 ? 0 : (state.RamUsedGb / state.RamTotalGb) * 100d;
-
-                    return new VmResourceMonitorSnapshot
+                vmStates = _vmMonitorStates.Values
+                    .Select(state =>
                     {
-                        VmName = vm.DisplayLabel,
-                        State = state.State,
-                        CpuPercent = state.CpuPercent,
-                        RamUsedGb = state.RamUsedGb,
-                        RamTotalGb = state.RamTotalGb,
-                        RamPressurePercent = Math.Clamp(pressure, 0d, 100d),
-                        CpuHistory = state.CpuHistory.ToArray(),
-                        RamPressureHistory = state.RamPressureHistory.ToArray()
-                    };
-                })
-                .ToList();
+                        var pressure = state.RamTotalGb <= 0 ? 0 : (state.RamUsedGb / state.RamTotalGb) * 100d;
+                        return new VmResourceMonitorSnapshot
+                        {
+                            VmName = state.VmName,
+                            State = state.State,
+                            CpuPercent = state.CpuPercent,
+                            RamUsedGb = state.RamUsedGb,
+                            RamTotalGb = state.RamTotalGb,
+                            RamPressurePercent = Math.Clamp(pressure, 0d, 100d),
+                            CpuHistory = state.CpuHistory.ToArray(),
+                            RamPressureHistory = state.RamPressureHistory.ToArray()
+                        };
+                    })
+                    .OrderBy(item => item.VmName, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
 
             var hostPressure = _hostRamTotalGb <= 0 ? 0 : (_hostRamUsedGb / _hostRamTotalGb) * 100d;
 
@@ -5214,6 +5367,36 @@ public partial class MainViewModel : ViewModelBase
                 HostRamPressureHistory = _hostRamPressureHistory.ToArray(),
                 VmSnapshots = vmStates
             };
+        }
+    }
+
+    private void EnsureFreshHostResourceSampleIfNeeded()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var maxAge = TimeSpan.FromMilliseconds(Math.Clamp(_monitorIntervalMs, 500, 5000) * 2);
+        if ((now - _lastHostResourceSampleUtc) <= maxAge)
+        {
+            return;
+        }
+
+        try
+        {
+            var (cpu, ramUsed, ramTotal) = _resourceMonitorHostSampler.Sample();
+            _hostCpuPercent = Math.Clamp(cpu, 0d, 100d);
+            _hostRamUsedGb = Math.Max(0d, ramUsed);
+            _hostRamTotalGb = Math.Max(0d, ramTotal);
+
+            EnqueueHistory(_hostCpuHistory, _hostCpuPercent);
+            var pressure = _hostRamTotalGb <= 0 ? 0 : (_hostRamUsedGb / _hostRamTotalGb) * 100d;
+            EnqueueHistory(_hostRamPressureHistory, Math.Clamp(pressure, 0d, 100d));
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Fallback host resource sampling failed during snapshot retrieval.");
+        }
+        finally
+        {
+            _lastHostResourceSampleUtc = now;
         }
     }
 
@@ -5916,6 +6099,8 @@ public partial class MainViewModel : ViewModelBase
             HostUsbSharingEnabled = config.Usb.Enabled;
             UsbAutoDetachOnClientDisconnect = config.Usb.AutoDetachOnClientDisconnect;
             _usbAutoDetachRetryAttempts = Math.Clamp(config.Usb.AutoDetachRetryAttempts, 1, 10);
+            _usbAutoDetachGracePeriod = TimeSpan.FromSeconds(Math.Clamp(config.Usb.AutoDetachGracePeriodSeconds, 5, 300));
+            _usbAutoDetachRetryDelay = TimeSpan.FromMilliseconds(Math.Clamp(config.Usb.AutoDetachRetryDelayMs, 100, 5000));
             UsbUnshareOnExit = config.Usb.UnshareOnExit;
             _monitorEnabled = config.Monitoring.Enabled;
             _monitorIntervalMs = config.Monitoring.IntervalMs;

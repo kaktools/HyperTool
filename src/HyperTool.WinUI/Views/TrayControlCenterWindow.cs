@@ -404,7 +404,7 @@ internal sealed class TrayControlCenterWindow : Window
             }
         }
 
-        var usbRenderKey = string.Join('|', state.UsbDevices.Select(item => item.SelectionKey));
+        var usbRenderKey = string.Join('|', state.UsbDevices.Select(item => $"{item.SelectionKey}:{item.Label}"));
         if (!string.Equals(_lastUsbRenderKey, usbRenderKey, StringComparison.Ordinal))
         {
             _lastUsbRenderKey = usbRenderKey;

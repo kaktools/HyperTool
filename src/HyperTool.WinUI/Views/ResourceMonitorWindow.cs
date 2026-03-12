@@ -21,7 +21,9 @@ public sealed class ResourceMonitorWindow : Window
     private readonly Func<ResourceMonitorSnapshot> _snapshotProvider;
     private readonly Func<Task>? _performanceOptimizationAction;
     private readonly bool _isDarkMode;
-    private readonly DispatcherQueueTimer _refreshTimer;
+    private CancellationTokenSource? _refreshLoopCts;
+    private Task? _refreshLoopTask;
+    private int _refreshIntervalMs = 1000;
     private readonly StackPanel _hostPanel = new() { Spacing = 8 };
     private readonly Grid _vmGrid = new() { ColumnSpacing = 10, RowSpacing = 10 };
     private readonly TextBlock _summaryText = new() { Opacity = 0.78 };
@@ -31,7 +33,11 @@ public sealed class ResourceMonitorWindow : Window
         HorizontalAlignment = HorizontalAlignment.Right,
         VerticalAlignment = VerticalAlignment.Center,
         Padding = new Thickness(10, 4, 10, 4),
-        Opacity = 0.45,
+        Opacity = 1,
+        Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x1F, 0x88, 0xE5)),
+        Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)),
+        BorderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x16, 0x6F, 0xC1)),
+        BorderThickness = new Thickness(1),
         MinWidth = 156
     };
     private const double VmCardMinWidth = 380;
@@ -53,15 +59,67 @@ public sealed class ResourceMonitorWindow : Window
         ApplyRequestedTheme();
         UpdateTitleBarAppearance();
 
-        _refreshTimer = DispatcherQueue.CreateTimer();
-        _refreshTimer.Interval = TimeSpan.FromMilliseconds(1000);
-        _refreshTimer.Tick += (_, _) => Refresh();
-        _refreshTimer.Start();
+        StartRefreshLoop();
 
         _hostDiscoButton.Click += async (_, _) => await TriggerPerformanceOptimizationAsync();
 
-        Closed += (_, _) => _refreshTimer.Stop();
+        Closed += (_, _) => StopRefreshLoop();
         Refresh();
+    }
+
+    private void StartRefreshLoop()
+    {
+        StopRefreshLoop();
+
+        var dispatcherQueue = DispatcherQueue;
+        if (dispatcherQueue is null)
+        {
+            return;
+        }
+
+        _refreshLoopCts = new CancellationTokenSource();
+        var token = _refreshLoopCts.Token;
+        _refreshLoopTask = Task.Run(async () =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(Math.Clamp(_refreshIntervalMs, 500, 5000)), token);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                try
+                {
+                    if (!dispatcherQueue.TryEnqueue(() => Refresh()))
+                    {
+                        break;
+                    }
+                }
+                catch
+                {
+                    // Keep loop alive unless cancellation requested.
+                }
+            }
+        }, token);
+    }
+
+    private void StopRefreshLoop()
+    {
+        try
+        {
+            _refreshLoopCts?.Cancel();
+        }
+        catch
+        {
+        }
+
+        _refreshLoopCts?.Dispose();
+        _refreshLoopCts = null;
+        _refreshLoopTask = null;
     }
 
     private UIElement BuildLayout()
@@ -138,187 +196,200 @@ public sealed class ResourceMonitorWindow : Window
 
     private void Refresh()
     {
-        ResourceMonitorSnapshot snapshot;
         try
         {
-            snapshot = _snapshotProvider() ?? _lastGoodSnapshot ?? new ResourceMonitorSnapshot();
-            _lastGoodSnapshot = snapshot;
+            ResourceMonitorSnapshot snapshot;
+            try
+            {
+                snapshot = _snapshotProvider() ?? _lastGoodSnapshot ?? new ResourceMonitorSnapshot();
+                _lastGoodSnapshot = snapshot;
+            }
+            catch
+            {
+                if (_lastGoodSnapshot is null)
+                {
+                    return;
+                }
+
+                snapshot = _lastGoodSnapshot;
+            }
+
+            var vmSnapshots = (snapshot.VmSnapshots ?? Array.Empty<VmResourceMonitorSnapshot>())
+                .Where(item => item is not null)
+                .ToList();
+            var hostCpuHistory = (snapshot.HostCpuHistory ?? Array.Empty<double>()).ToArray();
+            var hostRamHistory = (snapshot.HostRamPressureHistory ?? Array.Empty<double>()).ToArray();
+
+            var hostCpuPercent = Math.Clamp(snapshot.HostCpuPercent, 0d, 100d);
+            var hostRamTotalGb = Math.Max(0d, snapshot.HostRamTotalGb);
+            var hostRamUsedGb = Math.Clamp(snapshot.HostRamUsedGb, 0d, hostRamTotalGb <= 0 ? double.MaxValue : hostRamTotalGb);
+            var hostRamPercent = hostRamTotalGb <= 0d ? 0d : Math.Clamp((hostRamUsedGb / hostRamTotalGb) * 100d, 0d, 100d);
+
+            _refreshIntervalMs = Math.Clamp(snapshot.IntervalMs, 500, 5000);
+
+            var vmConnected = vmSnapshots.Count(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase));
+            var summaryText = $"Intervall: {snapshot.IntervalMs} ms   |   Verbundene Guests: {vmConnected}/{vmSnapshots.Count}";
+
+            var hostElements = new List<UIElement>();
+            var hostHeaderRow = new Grid();
+            hostHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            hostHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var hostTitle = new TextBlock
+            {
+                Text = "Host Ressourcen",
+                FontSize = 20,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+            };
+            hostHeaderRow.Children.Add(hostTitle);
+
+            // The button instance is reused across ticks, so detach it from the previous header row first.
+            if (_hostDiscoButton.Parent is Panel oldParent)
+            {
+                oldParent.Children.Remove(_hostDiscoButton);
+            }
+
+            Grid.SetColumn(_hostDiscoButton, 1);
+            hostHeaderRow.Children.Add(_hostDiscoButton);
+            hostElements.Add(hostHeaderRow);
+
+            var hostKpiGrid = new Grid { ColumnSpacing = 12 };
+            hostKpiGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            hostKpiGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            hostKpiGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            hostKpiGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var cpuHeaderRow = new Grid
+            {
+                ColumnSpacing = 10,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                MinHeight = 60
+            };
+            cpuHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            cpuHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            cpuHeaderRow.Children.Add(new TextBlock
+            {
+                Text = "Prozessor",
+                FontSize = 18,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                Opacity = 0.9,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            var cpuPercentText = new TextBlock
+            {
+                Text = $"{hostCpuPercent:0.#}%",
+                FontSize = 30,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                LineHeight = 34,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(cpuPercentText, 1);
+            cpuHeaderRow.Children.Add(cpuPercentText);
+            hostKpiGrid.Children.Add(cpuHeaderRow);
+
+            var cpuChart = CreateChartCard("Prozessor-Verlauf", hostCpuHistory, 420, 96, Color.FromArgb(0xFF, 0x36, 0xC4, 0xFF));
+            Grid.SetRow(cpuChart, 1);
+            hostKpiGrid.Children.Add(cpuChart);
+
+            var ramHeaderPanel = new StackPanel
+            {
+                Spacing = 4,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                MinHeight = 60
+            };
+            ramHeaderPanel.Children.Add(new TextBlock
+            {
+                Text = "Arbeitsspeicher-Auslastung",
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                Opacity = 0.9,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                TextAlignment = TextAlignment.Center
+            });
+
+            var hostRamUsageRow = new Grid
+            {
+                ColumnSpacing = 8,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            hostRamUsageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            hostRamUsageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var hostRamBar = (FrameworkElement)CreatePressureBar(hostRamPercent, width: 230);
+            Grid.SetColumn(hostRamBar, 0);
+            hostRamUsageRow.Children.Add(hostRamBar);
+
+            var hostRamText = new TextBlock
+            {
+                Text = $"{hostRamUsedGb:0.0}/{hostRamTotalGb:0.0} GB ({hostRamPercent:0.#}%)",
+                Opacity = 0.9,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                FontSize = 14,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(hostRamText, 1);
+            hostRamUsageRow.Children.Add(hostRamText);
+
+            ramHeaderPanel.Children.Add(hostRamUsageRow);
+            Grid.SetColumn(ramHeaderPanel, 1);
+            hostKpiGrid.Children.Add(ramHeaderPanel);
+
+            var ramChart = CreateChartCard("RAM-Auslastung", hostRamHistory, 420, 96, Color.FromArgb(0xFF, 0xFF, 0xB3, 0x3C));
+            Grid.SetRow(ramChart, 1);
+            Grid.SetColumn(ramChart, 1);
+            hostKpiGrid.Children.Add(ramChart);
+            hostElements.Add(hostKpiGrid);
+
+            var vmTotalCpu = vmSnapshots.Where(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase)).Sum(item => item.CpuPercent);
+            var vmTotalRam = vmSnapshots.Where(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase)).Sum(item => item.RamUsedGb);
+            hostElements.Add(new TextBlock
+            {
+                Text = $"Host vs Guest gesamt   Prozessor: Host {hostCpuPercent:0.#}% / Guest {vmTotalCpu:0.#}%   Arbeitsspeicher: Host {hostRamUsedGb:0.0} GB / Guest {vmTotalRam:0.0} GB",
+                Opacity = 0.85
+            });
+
+            var vms = vmSnapshots
+                .OrderByDescending(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase))
+                .ThenBy(item => item.VmName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var vmCardWidth = ResolveVmCardWidthForTwoVisibleCards();
+            var vmCards = new List<FrameworkElement>(vms.Count);
+
+            for (var index = 0; index < vms.Count; index++)
+            {
+                var vmCard = CreateVmCard(vms[index]);
+                vmCard.Width = vmCardWidth;
+                vmCards.Add(vmCard);
+            }
+
+            _summaryText.Text = summaryText;
+
+            _hostPanel.Children.Clear();
+            foreach (var hostElement in hostElements)
+            {
+                _hostPanel.Children.Add(hostElement);
+            }
+
+            _vmGrid.Children.Clear();
+            _vmGrid.ColumnDefinitions.Clear();
+            _vmGrid.RowDefinitions.Clear();
+            _vmGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            for (var index = 0; index < vmCards.Count; index++)
+            {
+                _vmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(vmCardWidth) });
+                Grid.SetRow(vmCards[index], 0);
+                Grid.SetColumn(vmCards[index], index);
+                _vmGrid.Children.Add(vmCards[index]);
+            }
         }
         catch
         {
-            if (_lastGoodSnapshot is null)
-            {
-                return;
-            }
-
-            snapshot = _lastGoodSnapshot;
-        }
-
-        var vmSnapshots = (snapshot.VmSnapshots ?? Array.Empty<VmResourceMonitorSnapshot>())
-            .Where(item => item is not null)
-            .ToList();
-        var hostCpuHistory = (snapshot.HostCpuHistory ?? Array.Empty<double>()).ToArray();
-        var hostRamHistory = (snapshot.HostRamPressureHistory ?? Array.Empty<double>()).ToArray();
-
-        var hostCpuPercent = Math.Clamp(snapshot.HostCpuPercent, 0d, 100d);
-        var hostRamTotalGb = Math.Max(0d, snapshot.HostRamTotalGb);
-        var hostRamUsedGb = Math.Clamp(snapshot.HostRamUsedGb, 0d, hostRamTotalGb <= 0 ? double.MaxValue : hostRamTotalGb);
-        var hostRamPercent = hostRamTotalGb <= 0d ? 0d : Math.Clamp((hostRamUsedGb / hostRamTotalGb) * 100d, 0d, 100d);
-
-        _refreshTimer.Interval = TimeSpan.FromMilliseconds(Math.Clamp(snapshot.IntervalMs, 500, 5000));
-
-        var vmConnected = vmSnapshots.Count(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase));
-        var summaryText = $"Intervall: {snapshot.IntervalMs} ms   |   Verbundene Guests: {vmConnected}/{vmSnapshots.Count}";
-
-        var hostElements = new List<UIElement>();
-        var hostHeaderRow = new Grid();
-        hostHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        hostHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var hostTitle = new TextBlock
-        {
-            Text = "Host Ressourcen",
-            FontSize = 20,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
-        };
-        hostHeaderRow.Children.Add(hostTitle);
-
-        Grid.SetColumn(_hostDiscoButton, 1);
-        hostHeaderRow.Children.Add(_hostDiscoButton);
-        hostElements.Add(hostHeaderRow);
-
-        var hostKpiGrid = new Grid { ColumnSpacing = 12 };
-        hostKpiGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        hostKpiGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        hostKpiGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        hostKpiGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-        var cpuHeaderRow = new Grid
-        {
-            ColumnSpacing = 10,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            MinHeight = 60
-        };
-        cpuHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        cpuHeaderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        cpuHeaderRow.Children.Add(new TextBlock
-        {
-            Text = "Prozessor",
-            FontSize = 18,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            Opacity = 0.9,
-            VerticalAlignment = VerticalAlignment.Center
-        });
-
-        var cpuPercentText = new TextBlock
-        {
-            Text = $"{hostCpuPercent:0.#}%",
-            FontSize = 30,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            LineHeight = 34,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        Grid.SetColumn(cpuPercentText, 1);
-        cpuHeaderRow.Children.Add(cpuPercentText);
-        hostKpiGrid.Children.Add(cpuHeaderRow);
-
-        var cpuChart = CreateChartCard("Prozessor-Verlauf", hostCpuHistory, 420, 96, Color.FromArgb(0xFF, 0x36, 0xC4, 0xFF));
-        Grid.SetRow(cpuChart, 1);
-        hostKpiGrid.Children.Add(cpuChart);
-
-        var ramHeaderPanel = new StackPanel
-        {
-            Spacing = 4,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            MinHeight = 60
-        };
-        ramHeaderPanel.Children.Add(new TextBlock
-        {
-            Text = "Arbeitsspeicher-Auslastung",
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            Opacity = 0.9,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            TextAlignment = TextAlignment.Center
-        });
-
-        var hostRamUsageRow = new Grid
-        {
-            ColumnSpacing = 8,
-            HorizontalAlignment = HorizontalAlignment.Center
-        };
-        hostRamUsageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        hostRamUsageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var hostRamBar = (FrameworkElement)CreatePressureBar(hostRamPercent, width: 230);
-        Grid.SetColumn(hostRamBar, 0);
-        hostRamUsageRow.Children.Add(hostRamBar);
-
-        var hostRamText = new TextBlock
-        {
-            Text = $"{hostRamUsedGb:0.0}/{hostRamTotalGb:0.0} GB ({hostRamPercent:0.#}%)",
-            Opacity = 0.9,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            FontSize = 14,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        Grid.SetColumn(hostRamText, 1);
-        hostRamUsageRow.Children.Add(hostRamText);
-
-        ramHeaderPanel.Children.Add(hostRamUsageRow);
-        Grid.SetColumn(ramHeaderPanel, 1);
-        hostKpiGrid.Children.Add(ramHeaderPanel);
-
-        var ramChart = CreateChartCard("RAM-Auslastung", hostRamHistory, 420, 96, Color.FromArgb(0xFF, 0xFF, 0xB3, 0x3C));
-        Grid.SetRow(ramChart, 1);
-        Grid.SetColumn(ramChart, 1);
-        hostKpiGrid.Children.Add(ramChart);
-        hostElements.Add(hostKpiGrid);
-
-        var vmTotalCpu = vmSnapshots.Where(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase)).Sum(item => item.CpuPercent);
-        var vmTotalRam = vmSnapshots.Where(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase)).Sum(item => item.RamUsedGb);
-        hostElements.Add(new TextBlock
-        {
-            Text = $"Host vs Guest gesamt   Prozessor: Host {hostCpuPercent:0.#}% / Guest {vmTotalCpu:0.#}%   Arbeitsspeicher: Host {hostRamUsedGb:0.0} GB / Guest {vmTotalRam:0.0} GB",
-            Opacity = 0.85
-        });
-
-        var vms = vmSnapshots
-            .OrderByDescending(item => string.Equals(item.State, "Connected", StringComparison.OrdinalIgnoreCase))
-            .ThenBy(item => item.VmName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var vmCardWidth = ResolveVmCardWidthForTwoVisibleCards();
-        var vmCards = new List<FrameworkElement>(vms.Count);
-
-        for (var index = 0; index < vms.Count; index++)
-        {
-            var vmCard = CreateVmCard(vms[index]);
-            vmCard.Width = vmCardWidth;
-            vmCards.Add(vmCard);
-        }
-
-        _summaryText.Text = summaryText;
-
-        _hostPanel.Children.Clear();
-        foreach (var hostElement in hostElements)
-        {
-            _hostPanel.Children.Add(hostElement);
-        }
-
-        _vmGrid.Children.Clear();
-        _vmGrid.ColumnDefinitions.Clear();
-        _vmGrid.RowDefinitions.Clear();
-        _vmGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-        for (var index = 0; index < vmCards.Count; index++)
-        {
-            _vmGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(vmCardWidth) });
-            Grid.SetRow(vmCards[index], 0);
-            Grid.SetColumn(vmCards[index], index);
-            _vmGrid.Children.Add(vmCards[index]);
+            // Keep the previous visual state if a single refresh tick fails.
         }
     }
 
@@ -607,6 +678,7 @@ public sealed class ResourceMonitorWindow : Window
         }
 
         _hostDiscoButton.IsEnabled = false;
+        _hostDiscoButton.Opacity = 0.6;
         try
         {
             Close();
@@ -618,6 +690,7 @@ public sealed class ResourceMonitorWindow : Window
         finally
         {
             _hostDiscoButton.IsEnabled = true;
+            _hostDiscoButton.Opacity = 1;
         }
     }
 }

@@ -495,8 +495,13 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         }
         else
         {
-                var preferredSelectionKey = preferredUsb is null ? null : BuildUsbSelectionKey(preferredUsb);
-                if (!string.IsNullOrWhiteSpace(preferredSelectionKey))
+            var preferredSelectionKey = preferredUsb is null ? null : BuildUsbSelectionKey(preferredUsb);
+            if (string.IsNullOrWhiteSpace(preferredSelectionKey) && _selectedUsbDevice is not null)
+            {
+                preferredSelectionKey = BuildUsbSelectionKey(_selectedUsbDevice);
+            }
+
+            if (!string.IsNullOrWhiteSpace(preferredSelectionKey))
             {
                 _selectedUsbIndex = _usbDevices.FindIndex(device =>
                     string.Equals(BuildUsbSelectionKey(device), preferredSelectionKey, StringComparison.OrdinalIgnoreCase));
@@ -705,15 +710,7 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
 
         foreach (var usbDevice in _usbDevices)
         {
-            var label = string.IsNullOrWhiteSpace(usbDevice.Description)
-                ? usbDevice.BusId
-                : usbDevice.Description;
-
-            if (string.IsNullOrWhiteSpace(label))
-            {
-                label = "USB-Gerät";
-            }
-
+            var label = BuildUsbTrayLabel(usbDevice);
             state.UsbDevices.Add(new TrayUsbItem(BuildUsbSelectionKey(usbDevice), label));
         }
 
@@ -865,22 +862,97 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
 
     private static string BuildUsbSelectionKey(UsbIpDeviceInfo usbDevice)
     {
+        if (!string.IsNullOrWhiteSpace(usbDevice.PersistedGuid))
+        {
+            return "guid:" + usbDevice.PersistedGuid.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(usbDevice.InstanceId))
+        {
+            return "instance:" + usbDevice.InstanceId.Trim();
+        }
+
+        var hardwareIdentity = GetUsbHardwareIdentityCandidate(usbDevice);
+        if (!string.IsNullOrWhiteSpace(hardwareIdentity))
+        {
+            var key = "hardware:" + hardwareIdentity;
+            if (!IsPreciseUsbHardwareIdentity(hardwareIdentity)
+                && !string.IsNullOrWhiteSpace(usbDevice.BusId))
+            {
+                key += "|busid:" + usbDevice.BusId.Trim();
+            }
+
+            return key;
+        }
+
         if (!string.IsNullOrWhiteSpace(usbDevice.BusId))
         {
-            return usbDevice.BusId.Trim();
+            return "busid:" + usbDevice.BusId.Trim();
         }
 
         if (!string.IsNullOrWhiteSpace(usbDevice.Description))
         {
-            return usbDevice.Description.Trim();
+            return "description:" + usbDevice.Description.Trim();
         }
 
         if (!string.IsNullOrWhiteSpace(usbDevice.DisplayName))
         {
-            return usbDevice.DisplayName.Trim();
+            return "displayname:" + usbDevice.DisplayName.Trim();
         }
 
         return string.Empty;
+    }
+
+    private static string GetUsbHardwareIdentityCandidate(UsbIpDeviceInfo usbDevice)
+    {
+        var precise = NormalizeUsbHardwareId(usbDevice.HardwareIdentityKey);
+        if (!string.IsNullOrWhiteSpace(precise))
+        {
+            return precise;
+        }
+
+        return NormalizeUsbHardwareId(usbDevice.HardwareId);
+    }
+
+    private static string NormalizeUsbHardwareId(string? hardwareId)
+    {
+        if (string.IsNullOrWhiteSpace(hardwareId))
+        {
+            return string.Empty;
+        }
+
+        var normalized = hardwareId.Trim().ToUpperInvariant();
+        if (normalized.StartsWith("USB\\", StringComparison.Ordinal))
+        {
+            normalized = normalized.Substring(4);
+        }
+
+        return normalized;
+    }
+
+    private static bool IsPreciseUsbHardwareIdentity(string hardwareIdentity)
+    {
+        return !string.IsNullOrWhiteSpace(hardwareIdentity)
+               && hardwareIdentity.Contains("&REV_", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildUsbTrayLabel(UsbIpDeviceInfo usbDevice)
+    {
+        var label = string.IsNullOrWhiteSpace(usbDevice.CustomName)
+            ? (string.IsNullOrWhiteSpace(usbDevice.Description) ? usbDevice.BusId : usbDevice.Description)
+            : usbDevice.CustomName;
+
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            label = "USB-Gerät";
+        }
+
+        if (!string.IsNullOrWhiteSpace(usbDevice.CustomComment))
+        {
+            label = $"{label} ({usbDevice.CustomComment.Trim()})";
+        }
+
+        return label;
     }
 
     private static string NormalizeSwitchDisplayName(string? switchName)

@@ -16,7 +16,7 @@ public sealed class VmDefinition
 
     public string MountedIsoPath { get; set; } = string.Empty;
 
-    public string MonitorStateText { get; set; } = "OFF";
+    public string MonitorStateText { get; set; } = "Guest nicht erreichbar";
 
     public string MonitorCpuText { get; set; } = "CPU -";
 

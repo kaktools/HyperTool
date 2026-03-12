@@ -33,6 +33,8 @@
     "enabled": true,
     "autoDetachOnClientDisconnect": true,
     "autoDetachRetryAttempts": 3,
+    "autoDetachGracePeriodSeconds": 90,
+    "autoDetachRetryDelayMs": 450,
     "unshareOnExit": true,
     "autoShareDeviceKeys": []
   },
