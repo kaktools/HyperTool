@@ -1,5 +1,43 @@
 # HyperTool Release Notes
 
+## v2.4.6
+
+### Highlights
+
+- Host-Ressourcenmonitor aktualisiert CPU/RAM im offenen Fenster wieder zuverlässig im eingestellten Intervall (Live-Monitoring).
+- Host-/Guest-USB-Auswahl im Tasktray/Control-Center wurde stabilisiert (kein Zurueckspringen auf das erste Geraet bei Connect/Disconnect).
+- USB-Kommentare werden im Host-Tasktray jetzt ohne Neustart korrekt und sofort aktualisiert.
+- Build-/Installer-Artefakte fuer Host und Guest auf `2.4.6` erstellt.
+
+### Verbessert
+
+- Resource-Monitor:
+	- Refresh-Loop im Fenster robuster gemacht.
+	- Snapshot-Pfad gegen parallele VM-Listen-Aenderungen gehaertet.
+	- Host-Sampling-Fallback ergaenzt, damit Host-Werte auch bei stoerenden Zwischenzustaenden weiterlaufen.
+	- UI-Refresh-Blocker durch wiederverwendetes Button-Element beseitigt.
+- CPU-Sampling Host:
+	- `% Processor Utility` als primaere Quelle integriert (naeher an Task-Manager-Interpretation).
+	- Fallback-Kette auf WMI/GetSystemTimes bleibt aktiv.
+- VM-Monitorstatus:
+	- Standard-/Fallbacktexte auf `Guest nicht erreichbar` vereinheitlicht.
+	- Flackern in VM-Chips reduziert, indem Monitortexte beim Runtime-State-Rebuild erhalten bleiben.
+- USB-Auswahl/Labels:
+	- Host SelectionKey-Logik an Core-Identitaetslogik angeglichen (GUID/Instance/Hardware/BusID).
+	- Guest-Tray-Auswahl priorisiert jetzt die echte Tray-Selektion vor Main-Window-Fokus.
+	- Label-/Kommentar-Renderkeys im Host-Control-Center erweitert, damit Kommentar-Updates sofort sichtbar sind.
+
+### Behoben
+
+- Host-Ressourcenmonitor zeigte teils nur den Oeffnungszustand und aktualisierte danach nicht mehr.
+- Host-Tasktray-Kommentar erschien bei neu kommentierten USB-Geraeten erst nach App-Neustart.
+- Guest-Tasktray nutzte bei Connect/Disconnect teils nicht das ausgewaehlte USB-Geraet.
+- Host-Tasktray/Control-Center uebernahm USB-Auswahl teils erst beim zweiten Klick.
+
+### Doku
+
+- README auf `v2.4.6` aktualisiert (Version + Build-Beispiele + aktueller Release-Stand).
+
 ## v2.4.5
 
 ### Highlights

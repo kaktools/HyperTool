@@ -4,7 +4,11 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.4.5**
+- Version: **v2.4.6**
+- Resource-Monitor Host-Live-Refresh stabilisiert: CPU/RAM aktualisieren im offenen Fenster wieder im eingestellten Intervall.
+- VM-Monitorstatus in den Host-Chips bleibt stabil und verwendet konsistent `Guest nicht erreichbar` statt `OFF`.
+- USB-Auswahl im Host-/Guest-Tasktray robuster gemacht (gewählte Geräte bleiben bei Connect/Disconnect konsistent).
+- USB-Kommentare werden im Host-Tasktray/Control-Center ohne Neustart sofort aktualisiert.
 - Resource-Monitor Host-Layout überarbeitet: Prozessor- und Arbeitsspeicher-KPI sind zentriert über ihren jeweiligen Trends ausgerichtet.
 - Resource-Monitor VM-Ansicht priorisiert verbundene VMs und nutzt horizontales Scrolling für zusätzliche Karten.
 - Resource-Monitor ist bei Snapshot-/Refresh-Aussetzern robuster (letzte gültige Werte bleiben sichtbar, kein Leerzustand mehr).
@@ -114,23 +118,23 @@ Legacy-Hinweis für Guestx86:
 ### Host
 
 - build-host.bat
-- build-installer-host.bat version=2.4.5
+- build-installer-host.bat version=2.4.6
 
 ### Guest
 
 - build-guest.bat
-- build-installer-guest.bat version=2.4.5
+- build-installer-guest.bat version=2.4.6
 
 ### Guestx86 (Legacy WPF)
 
 - build-guestx86.bat
 - build_guestx86.bat
-- build_installer_guestx86.bat version=2.4.5
+- build_installer_guestx86.bat version=2.4.6
 
 ### Komplett
 
 - build-all.bat
-- build-all.bat version=2.4.5 host guest host-installer guest-installer no-pause
+- build-all.bat version=2.4.6 host guest host-installer guest-installer no-pause
 
 Ausgaben:
 
