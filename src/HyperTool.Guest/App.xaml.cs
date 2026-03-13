@@ -3986,6 +3986,8 @@ public sealed partial class App : Application
             {
                 BusId = busId,
                 GuestComputerName = (entry.GuestComputerName ?? string.Empty).Trim(),
+                SourceVmId = (entry.SourceVmId ?? string.Empty).Trim(),
+                GuestVmName = (entry.GuestVmName ?? string.Empty).Trim(),
                 ClientIpAddress = (entry.ClientIpAddress ?? string.Empty).Trim()
             };
         }
@@ -4402,16 +4404,26 @@ public sealed partial class App : Application
             return;
         }
 
+        var existingAttachedGuest = (device.AttachedGuestComputerName ?? string.Empty).Trim();
+        var isLikelyLocalAttachment = device.IsAttached
+            && (string.IsNullOrWhiteSpace(existingAttachedGuest)
+                || string.Equals(existingAttachedGuest, Environment.MachineName, StringComparison.OrdinalIgnoreCase));
+
         if (!_hostUsbAttachmentsByBusId.TryGetValue(busId, out var attachment))
         {
+            if (!isLikelyLocalAttachment)
+            {
+                device.AttachedGuestComputerName = string.Empty;
+                device.ClientIpAddress = string.Empty;
+            }
+
             return;
         }
 
-        var attachedGuest = (attachment.GuestComputerName ?? string.Empty).Trim();
+        var attachedGuest = !string.IsNullOrWhiteSpace(attachment.GuestVmName)
+            ? attachment.GuestVmName.Trim()
+            : (attachment.GuestComputerName ?? string.Empty).Trim();
         var attachedClientIp = (attachment.ClientIpAddress ?? string.Empty).Trim();
-        var isLikelyLocalAttachment = device.IsAttached
-            && (string.IsNullOrWhiteSpace(device.AttachedGuestComputerName)
-                || string.Equals(device.AttachedGuestComputerName, Environment.MachineName, StringComparison.OrdinalIgnoreCase));
 
         device.IsAttachedByOtherGuest = !isLikelyLocalAttachment
             && !string.IsNullOrWhiteSpace(attachedGuest);

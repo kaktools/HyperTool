@@ -169,6 +169,8 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
             {
                 BusId = (entry.BusId ?? string.Empty).Trim(),
                 GuestComputerName = (entry.GuestComputerName ?? string.Empty).Trim(),
+                SourceVmId = (entry.SourceVmId ?? string.Empty).Trim(),
+                GuestVmName = (entry.GuestVmName ?? string.Empty).Trim(),
                 ClientIpAddress = (entry.ClientIpAddress ?? string.Empty).Trim()
             })
             .Where(entry => !string.IsNullOrWhiteSpace(entry.BusId))

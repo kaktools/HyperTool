@@ -26,6 +26,10 @@ public sealed class UsbDeviceAttachmentEntry
 
     public string GuestComputerName { get; set; } = string.Empty;
 
+    public string SourceVmId { get; set; } = string.Empty;
+
+    public string GuestVmName { get; set; } = string.Empty;
+
     public string ClientIpAddress { get; set; } = string.Empty;
 }
 

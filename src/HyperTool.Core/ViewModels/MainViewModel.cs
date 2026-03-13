@@ -1971,6 +1971,17 @@ public partial class MainViewModel : ViewModelBase
                 ApplyUsbDeviceMetadata(device);
 
                 if (device.IsAttached
+                    && UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, _usbAutoDetachGracePeriod, out var sourceVmId))
+                {
+                    var vmNameById = ResolveVmNameByVmId(sourceVmId);
+                    if (!string.IsNullOrWhiteSpace(vmNameById))
+                    {
+                        device.AttachedGuestComputerName = vmNameById;
+                        continue;
+                    }
+                }
+
+                if (device.IsAttached
                     && !string.IsNullOrWhiteSpace(device.BusId)
                     && UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device, _usbAutoDetachGracePeriod, out var guestComputerName))
                 {
@@ -4429,11 +4440,21 @@ public partial class MainViewModel : ViewModelBase
             .Where(device => device is not null
                              && device.IsAttached
                              && !string.IsNullOrWhiteSpace(device.BusId))
-            .Select(device => new UsbDeviceAttachmentEntry
+            .Select(device =>
             {
-                BusId = (device.BusId ?? string.Empty).Trim(),
-                GuestComputerName = (device.AttachedGuestComputerName ?? string.Empty).Trim(),
-                ClientIpAddress = (device.ClientIpAddress ?? string.Empty).Trim()
+                var sourceVmId = UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, _usbAutoDetachGracePeriod, out var vmId)
+                    ? vmId
+                    : string.Empty;
+                var guestVmName = ResolveVmNameByVmId(sourceVmId);
+
+                return new UsbDeviceAttachmentEntry
+                {
+                    BusId = (device.BusId ?? string.Empty).Trim(),
+                    GuestComputerName = (device.AttachedGuestComputerName ?? string.Empty).Trim(),
+                    SourceVmId = sourceVmId,
+                    GuestVmName = guestVmName,
+                    ClientIpAddress = (device.ClientIpAddress ?? string.Empty).Trim()
+                };
             })
             .Where(entry => !string.IsNullOrWhiteSpace(entry.BusId))
             .OrderBy(entry => entry.BusId, StringComparer.OrdinalIgnoreCase)
@@ -5608,16 +5629,10 @@ public partial class MainViewModel : ViewModelBase
 
     private string ResolveVmNameForHostPacket(VmHostResourcePacket packet)
     {
-        var vmId = (packet.VmId ?? string.Empty).Trim();
-        if (!string.IsNullOrWhiteSpace(vmId))
+        var vmNameById = ResolveVmNameByVmId(packet.VmId);
+        if (!string.IsNullOrWhiteSpace(vmNameById))
         {
-            var vmById = AvailableVms.FirstOrDefault(vm =>
-                !string.IsNullOrWhiteSpace(vm.VmId)
-                && string.Equals(vm.VmId, vmId, StringComparison.OrdinalIgnoreCase));
-            if (vmById is not null)
-            {
-                return vmById.Name;
-            }
+            return vmNameById;
         }
 
         var vmName = (packet.VmName ?? string.Empty).Trim();
@@ -5634,6 +5649,21 @@ public partial class MainViewModel : ViewModelBase
         }
 
         return vmName;
+    }
+
+    private string ResolveVmNameByVmId(string? vmId)
+    {
+        var normalizedVmId = (vmId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedVmId))
+        {
+            return string.Empty;
+        }
+
+        var vmById = AvailableVms.FirstOrDefault(vm =>
+            !string.IsNullOrWhiteSpace(vm.VmId)
+            && string.Equals(vm.VmId, normalizedVmId, StringComparison.OrdinalIgnoreCase));
+
+        return vmById?.Name ?? string.Empty;
     }
 
     private void ApplyPreferredMonitorSource(VmResourceMonitorRuntimeState state, bool isVmRunning, DateTimeOffset now, bool enqueueHistory)

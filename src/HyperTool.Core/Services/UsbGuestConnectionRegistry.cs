@@ -8,6 +8,7 @@ public static class UsbGuestConnectionRegistry
     private sealed class GuestConnectionEntry
     {
         public string GuestComputerName { get; init; } = string.Empty;
+        public string SourceVmId { get; init; } = string.Empty;
         public DateTimeOffset LastSeenUtc { get; init; }
     }
 
@@ -26,6 +27,7 @@ public static class UsbGuestConnectionRegistry
         var deviceKey = BuildDeviceIdentityKey(ack);
         var eventType = (ack.EventType ?? string.Empty).Trim();
         var guestComputerName = (ack.GuestComputerName ?? string.Empty).Trim();
+        var sourceVmId = (ack.SourceVmId ?? string.Empty).Trim();
 
         if (string.IsNullOrWhiteSpace(busId) && string.IsNullOrWhiteSpace(deviceKey))
         {
@@ -50,12 +52,13 @@ public static class UsbGuestConnectionRegistry
 
         if ((string.Equals(eventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
              || string.Equals(eventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase))
-            && !string.IsNullOrWhiteSpace(guestComputerName)
-            && !string.IsNullOrWhiteSpace(deviceKey))
+            && !string.IsNullOrWhiteSpace(deviceKey)
+            && (!string.IsNullOrWhiteSpace(guestComputerName) || !string.IsNullOrWhiteSpace(sourceVmId)))
         {
             var entry = new GuestConnectionEntry
             {
                 GuestComputerName = guestComputerName,
+                SourceVmId = sourceVmId,
                 LastSeenUtc = DateTimeOffset.UtcNow
             };
 
@@ -98,6 +101,40 @@ public static class UsbGuestConnectionRegistry
         }
 
         guestComputerName = entry.GuestComputerName;
+        return true;
+    }
+
+    public static bool TryGetGuestVmId(string? busId, out string sourceVmId)
+    {
+        sourceVmId = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(busId))
+        {
+            return false;
+        }
+
+        var normalizedBusId = busId.Trim();
+
+        if (ConnectedGuestsByBusId.TryGetValue(normalizedBusId, out var busEntry)
+            && !string.IsNullOrWhiteSpace(busEntry.SourceVmId))
+        {
+            sourceVmId = busEntry.SourceVmId;
+            return true;
+        }
+
+        if (!DeviceKeyByBusId.TryGetValue(normalizedBusId, out var deviceKey)
+            || string.IsNullOrWhiteSpace(deviceKey))
+        {
+            deviceKey = "busid:" + normalizedBusId;
+        }
+
+        if (!ConnectedGuestsByDeviceKey.TryGetValue(deviceKey, out var entry)
+            || string.IsNullOrWhiteSpace(entry.SourceVmId))
+        {
+            return false;
+        }
+
+        sourceVmId = entry.SourceVmId;
         return true;
     }
 
@@ -170,6 +207,86 @@ public static class UsbGuestConnectionRegistry
             }
 
             guestComputerName = entry.GuestComputerName;
+
+            var busId = (device.BusId ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(busId))
+            {
+                DeviceKeyByBusId[busId] = key;
+                ConnectedGuestsByBusId[busId] = entry;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool TryGetFreshGuestVmId(string? busId, TimeSpan maxAge, out string sourceVmId)
+    {
+        sourceVmId = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(busId))
+        {
+            return false;
+        }
+
+        var normalizedBusId = busId.Trim();
+
+        if (ConnectedGuestsByBusId.TryGetValue(normalizedBusId, out var busEntry))
+        {
+            if ((DateTimeOffset.UtcNow - busEntry.LastSeenUtc) > maxAge || string.IsNullOrWhiteSpace(busEntry.SourceVmId))
+            {
+                return false;
+            }
+
+            sourceVmId = busEntry.SourceVmId;
+            return true;
+        }
+
+        if (!DeviceKeyByBusId.TryGetValue(normalizedBusId, out var deviceKey)
+            || string.IsNullOrWhiteSpace(deviceKey))
+        {
+            deviceKey = "busid:" + normalizedBusId;
+        }
+
+        if (!ConnectedGuestsByDeviceKey.TryGetValue(deviceKey, out var entry)
+            || (DateTimeOffset.UtcNow - entry.LastSeenUtc) > maxAge
+            || string.IsNullOrWhiteSpace(entry.SourceVmId))
+        {
+            return false;
+        }
+
+        sourceVmId = entry.SourceVmId;
+        return true;
+    }
+
+    public static bool TryGetFreshGuestVmId(UsbIpDeviceInfo? device, TimeSpan maxAge, out string sourceVmId)
+    {
+        sourceVmId = string.Empty;
+
+        if (device is null)
+        {
+            return false;
+        }
+
+        if (TryGetFreshGuestVmId(device.BusId, maxAge, out sourceVmId))
+        {
+            return true;
+        }
+
+        foreach (var key in BuildDeviceIdentityAliasKeys(device))
+        {
+            if (!ConnectedGuestsByDeviceKey.TryGetValue(key, out var entry))
+            {
+                continue;
+            }
+
+            if ((DateTimeOffset.UtcNow - entry.LastSeenUtc) > maxAge || string.IsNullOrWhiteSpace(entry.SourceVmId))
+            {
+                continue;
+            }
+
+            sourceVmId = entry.SourceVmId;
 
             var busId = (device.BusId ?? string.Empty).Trim();
             if (!string.IsNullOrWhiteSpace(busId))

@@ -5,12 +5,12 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 ## Aktueller Release-Stand
 
 - Version: **v2.5.0**
-- USB Multi-VM Status ist konsistenter: Guest zeigt Geraete bei Attach in anderen VMs jetzt als `Busy` statt faelschlich als verfuegbar.
-- Host->Guest Identity-Payload wurde um USB-Attachment-Daten erweitert, damit Guest-Status und Auto-Connect-Entscheidungen VM-uebergreifend korrekt bleiben.
-- Snapshot-Ansicht wurde stabilisiert: Name/Beschreibung/Datum wieder sichtbar, `Aktuell`-Markierung klarer, und Beschreibungen aus Create-Dialog werden zuverlaessiger uebernommen.
+- USB Multi-VM Status ist konsistenter: Guest zeigt Geräte bei Attach in anderen VMs jetzt als `Busy` statt fälschlich als verfügbar.
+- Host->Guest Identity-Payload wurde um USB-Attachment-Daten erweitert, damit Guest-Status und Auto-Connect-Entscheidungen VM-übergreifend korrekt bleiben.
+- Snapshot-Ansicht wurde stabilisiert: Name/Beschreibung/Datum wieder sichtbar, `Aktuell`-Markierung klarer, und Beschreibungen aus Create-Dialog werden zuverlässiger übernommen.
 - Host USB-Liste aktualisiert in-place mit stabilerer Reihenfolge, dadurch weniger visuelles Flackern bei Refresh/Status-Updates.
-- Guest Bottom-Notifications sind kompakter (ohne `(event=...) | {json}`), waehrend Detail-Logs in der Logdatei erhalten bleiben.
-- First-Start USB-Migrationshinweis ist jetzt sauber auf Update-Faelle begrenzt: alte USB-Eintraege werden einmalig entfernt und muessen neu gesetzt werden.
+- Guest Bottom-Notifications sind kompakter (ohne `(event=...) | {json}`), während Detail-Logs in der Logdatei erhalten bleiben.
+- First-Start USB-Migrationshinweis ist jetzt sauber auf Update-Fälle begrenzt: alte USB-Einträge werden einmalig entfernt und müssen neu gesetzt werden.
 
 ## Projekte
 
