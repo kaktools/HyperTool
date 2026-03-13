@@ -2058,6 +2058,7 @@ public sealed class MainWindow : Window
         };
 
         _checkpointTreeView.SelectionMode = TreeViewSelectionMode.Single;
+        _checkpointTreeView.ItemTemplate = CreateCheckpointTreeItemTemplate();
         _checkpointTreeView.SelectionChanged += (_, args) =>
         {
             if (_isUpdatingCheckpointTreeSelection)
@@ -2670,7 +2671,7 @@ public sealed class MainWindow : Window
     {
         var node = new TreeViewNode
         {
-            Content = BuildCheckpointNodeText(item),
+            Content = item,
             IsExpanded = true,
             HasUnrealizedChildren = false
         };
@@ -2691,33 +2692,57 @@ public sealed class MainWindow : Window
         return node;
     }
 
-    private static string BuildCheckpointNodeText(HyperVCheckpointTreeItem item)
+    private static DataTemplate CreateCheckpointTreeItemTemplate()
     {
-        var title = string.IsNullOrWhiteSpace(item.Name) ? "(Ohne Namen)" : item.Name;
-        var markers = new List<string>();
+        const string templateXaml = """
+<DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'>
+    <Border Background='{Binding Content.RowBackground}' CornerRadius='6' Padding='6,2,6,2'>
+        <Grid ColumnSpacing='12'>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width='2.2*'/>
+                <ColumnDefinition Width='1.8*'/>
+                <ColumnDefinition Width='220'/>
+            </Grid.ColumnDefinitions>
 
-        if (item.IsCurrent)
-        {
-            markers.Add("Aktuell");
-        }
+            <StackPanel Grid.Column='0' Orientation='Horizontal' Spacing='8' VerticalAlignment='Center'>
+                <TextBlock Text='{Binding Content.Name}'
+                           FontWeight='SemiBold'
+                           Foreground='{ThemeResource TextFillColorPrimaryBrush}'
+                           TextTrimming='CharacterEllipsis'
+                           TextWrapping='NoWrap'
+                           VerticalAlignment='Center'/>
+                <TextBlock Text='{Binding Content.CurrentBadge}'
+                           Foreground='{ThemeResource AccentBrush}'
+                           FontSize='11'
+                           FontWeight='SemiBold'
+                           VerticalAlignment='Center'
+                           TextTrimming='CharacterEllipsis'
+                           TextWrapping='NoWrap'/>
+            </StackPanel>
 
-        if (item.IsLatest)
-        {
-            markers.Add("Neueste");
-        }
+            <TextBlock Grid.Column='1'
+                       Text='{Binding Content.Description}'
+                       Foreground='{ThemeResource TextFillColorSecondaryBrush}'
+                       Opacity='0.9'
+                       TextTrimming='CharacterEllipsis'
+                       TextWrapping='NoWrap'
+                       VerticalAlignment='Center'/>
 
-        var createdText = item.Created == default ? "-" : item.Created.ToString("dd.MM.yyyy - HH:mm:ss");
+            <TextBlock Grid.Column='2'
+                       Text='{Binding Content.CreatedDisplay}'
+                       Foreground='{ThemeResource TextFillColorSecondaryBrush}'
+                       Opacity='0.86'
+                       HorizontalAlignment='Right'
+                       TextAlignment='Right'
+                       TextTrimming='CharacterEllipsis'
+                       TextWrapping='NoWrap'
+                       VerticalAlignment='Center'/>
+        </Grid>
+    </Border>
+</DataTemplate>
+""";
 
-        if (markers.Count == 0)
-        {
-            return $"{title}\n🕒 {createdText}";
-        }
-
-        var badgeLine = string.Join("   ", markers.Select(marker =>
-            string.Equals(marker, "Aktuell", StringComparison.OrdinalIgnoreCase)
-                ? "● Aktuell"
-                : "◆ Neueste"));
-        return $"{title}\n{badgeLine}\n🕒 {createdText}";
+        return (DataTemplate)XamlReader.Load(templateXaml);
     }
 
     private void SelectCheckpointNodeInTree(HyperVCheckpointTreeItem? item)
@@ -3614,7 +3639,7 @@ public sealed class MainWindow : Window
 
     private static DataTemplate CreateUsbDeviceListItemTemplate()
     {
-                const string templateXaml = """
+        const string templateXaml = """
 <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
     <Grid ColumnSpacing='10' Margin='4,2,4,2'>
         <Grid.ColumnDefinitions>
@@ -3629,12 +3654,12 @@ public sealed class MainWindow : Window
 </DataTemplate>
 """;
 
-                return (DataTemplate)XamlReader.Load(templateXaml);
+        return (DataTemplate)XamlReader.Load(templateXaml);
     }
 
     private static DataTemplate CreateSharedFolderListItemTemplate()
     {
-                const string templateXaml = """
+        const string templateXaml = """
 <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'>
     <Grid ColumnSpacing='10' Margin='4,2,4,2'>
         <Grid.ColumnDefinitions>
@@ -3651,7 +3676,7 @@ public sealed class MainWindow : Window
 </DataTemplate>
 """;
 
-                return (DataTemplate)XamlReader.Load(templateXaml);
+        return (DataTemplate)XamlReader.Load(templateXaml);
     }
 
     private void ResetSharedFolderEditor()

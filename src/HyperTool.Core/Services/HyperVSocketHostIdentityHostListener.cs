@@ -163,6 +163,17 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
                             && !string.IsNullOrWhiteSpace(entry.Description))
             .ToList();
 
+        featureAvailability.UsbDeviceAttachments = (featureAvailability.UsbDeviceAttachments ?? [])
+            .Where(entry => entry is not null)
+            .Select(entry => new UsbDeviceAttachmentEntry
+            {
+                BusId = (entry.BusId ?? string.Empty).Trim(),
+                GuestComputerName = (entry.GuestComputerName ?? string.Empty).Trim(),
+                ClientIpAddress = (entry.ClientIpAddress ?? string.Empty).Trim()
+            })
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.BusId))
+            .ToList();
+
         var payload = JsonSerializer.Serialize(new
         {
             hostName = Environment.MachineName,
@@ -172,7 +183,8 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
                 usbSharingEnabled = featureAvailability.UsbSharingEnabled,
                 sharedFoldersEnabled = featureAvailability.SharedFoldersEnabled,
                 usbDeviceMetadata = featureAvailability.UsbDeviceMetadata,
-                usbDeviceDescriptions = featureAvailability.UsbDeviceDescriptions
+                usbDeviceDescriptions = featureAvailability.UsbDeviceDescriptions,
+                usbDeviceAttachments = featureAvailability.UsbDeviceAttachments
             },
             timestampUtc = DateTime.UtcNow
         }, SerializerOptions);

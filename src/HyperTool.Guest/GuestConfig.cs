@@ -278,6 +278,10 @@ internal static class GuestConfigService
         if (!File.Exists(configPath))
         {
             var config = new GuestConfig();
+            // Fresh installs should not trigger the legacy USB reset migration popup.
+            config.Usb ??= new GuestUsbSettings();
+            config.Usb.UsbConfigResetMigrationApplied = true;
+            config.Usb.UsbConfigResetMigrationInfoPending = false;
             Write(configPath, config);
             created = true;
             return config;

@@ -3633,7 +3633,7 @@ internal sealed class GuestMainWindow : Window
         {
             XamlRoot = root.XamlRoot,
             Title = "USB-Konfiguration zurückgesetzt",
-            Content = "Nach einem USB-Migrations-Update wurden alte USB-Einträge einmalig entfernt. Bitte Auto-Connect für die gewünschten Geräte neu setzen.",
+            Content = "Beim ersten Start nach einem Update wurden alte USB-Einträge einmalig entfernt. Bitte Auto-Connect für die gewünschten Geräte neu setzen.",
             CloseButtonText = "OK",
             DefaultButton = ContentDialogButton.Close
         };
@@ -4290,8 +4290,8 @@ internal sealed class GuestMainWindow : Window
         {
             changed = keys.RemoveAll(existing =>
                     string.Equals(existing, key, StringComparison.OrdinalIgnoreCase)
-                    || (!string.IsNullOrWhiteSpace(legacyMetaPrefix)
-                        && existing.StartsWith(legacyMetaPrefix, StringComparison.OrdinalIgnoreCase))) > 0;
+                    || (!string.IsNullOrWhiteSpace(baseKey)
+                        && IsAutoConnectKeyMatch(existing, baseKey))) > 0;
         }
 
         if (!changed)
@@ -5197,10 +5197,35 @@ internal sealed class GuestMainWindow : Window
 
     private void OnLoggerEntryWritten(string message)
     {
-        if (!DispatcherQueue.TryEnqueue(() => AppendNotification(message)))
+        var compactMessage = CompactLoggerNotification(message);
+
+        if (!DispatcherQueue.TryEnqueue(() => AppendNotification(compactMessage)))
         {
-            AppendNotification(message);
+            AppendNotification(compactMessage);
         }
+    }
+
+    private static string CompactLoggerNotification(string message)
+    {
+        var normalized = (message ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return string.Empty;
+        }
+
+        var payloadMarkerIndex = normalized.IndexOf(" | ", StringComparison.Ordinal);
+        if (payloadMarkerIndex >= 0)
+        {
+            normalized = normalized[..payloadMarkerIndex].TrimEnd();
+        }
+
+        var eventMarkerIndex = normalized.IndexOf(" (event=", StringComparison.Ordinal);
+        if (eventMarkerIndex >= 0)
+        {
+            normalized = normalized[..eventMarkerIndex].TrimEnd();
+        }
+
+        return normalized;
     }
 
     private async Task SaveConfigQuietlyAsync()

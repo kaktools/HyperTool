@@ -1,3 +1,4 @@
+using HyperTool.Models;
 using System.Collections.Concurrent;
 
 namespace HyperTool.Services;
@@ -33,15 +34,15 @@ public static class UsbGuestConnectionRegistry
 
         if (string.Equals(eventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
         {
+            if (!string.IsNullOrWhiteSpace(deviceKey))
+            {
+                ConnectedGuestsByDeviceKey.TryRemove(deviceKey, out _);
+            }
+
             if (!string.IsNullOrWhiteSpace(busId))
             {
                 ConnectedGuestsByBusId.TryRemove(busId, out _);
                 DeviceKeyByBusId.TryRemove(busId, out _);
-            }
-
-            if (!string.IsNullOrWhiteSpace(deviceKey) && string.IsNullOrWhiteSpace(busId))
-            {
-                ConnectedGuestsByDeviceKey.TryRemove(deviceKey, out _);
             }
 
             return;
@@ -142,6 +143,47 @@ public static class UsbGuestConnectionRegistry
         return true;
     }
 
+    public static bool TryGetFreshGuestComputerName(UsbIpDeviceInfo? device, TimeSpan maxAge, out string guestComputerName)
+    {
+        guestComputerName = string.Empty;
+
+        if (device is null)
+        {
+            return false;
+        }
+
+        if (TryGetFreshGuestComputerName(device.BusId, maxAge, out guestComputerName))
+        {
+            return true;
+        }
+
+        foreach (var key in BuildDeviceIdentityAliasKeys(device))
+        {
+            if (!ConnectedGuestsByDeviceKey.TryGetValue(key, out var entry))
+            {
+                continue;
+            }
+
+            if ((DateTimeOffset.UtcNow - entry.LastSeenUtc) > maxAge)
+            {
+                continue;
+            }
+
+            guestComputerName = entry.GuestComputerName;
+
+            var busId = (device.BusId ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(busId))
+            {
+                DeviceKeyByBusId[busId] = key;
+                ConnectedGuestsByBusId[busId] = entry;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
     public static bool HasAnyFreshGuestConnection(TimeSpan maxAge)
     {
         var now = DateTimeOffset.UtcNow;
@@ -167,12 +209,6 @@ public static class UsbGuestConnectionRegistry
 
     private static string BuildDeviceIdentityKey(HyperVSocketDiagnosticsAck ack)
     {
-        var hardwareId = NormalizeHardwareId(ack.HardwareId);
-        if (!string.IsNullOrWhiteSpace(hardwareId))
-        {
-            return "hardware:" + hardwareId;
-        }
-
         var persistedGuid = (ack.PersistedGuid ?? string.Empty).Trim();
         if (!string.IsNullOrWhiteSpace(persistedGuid))
         {
@@ -185,6 +221,12 @@ public static class UsbGuestConnectionRegistry
             return "instance:" + instanceId;
         }
 
+        var hardwareId = NormalizeHardwareId(ack.HardwareId);
+        if (!string.IsNullOrWhiteSpace(hardwareId))
+        {
+            return "hardware:" + hardwareId;
+        }
+
         var busId = (ack.BusId ?? string.Empty).Trim();
         if (!string.IsNullOrWhiteSpace(busId))
         {
@@ -192,6 +234,38 @@ public static class UsbGuestConnectionRegistry
         }
 
         return string.Empty;
+    }
+
+    private static IEnumerable<string> BuildDeviceIdentityAliasKeys(UsbIpDeviceInfo device)
+    {
+        var persistedGuid = (device.PersistedGuid ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(persistedGuid))
+        {
+            yield return "guid:" + persistedGuid;
+        }
+
+        var instanceId = (device.InstanceId ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(instanceId))
+        {
+            yield return "instance:" + instanceId;
+        }
+
+        var hardwareId = NormalizeHardwareId(device.HardwareIdentityKey);
+        if (string.IsNullOrWhiteSpace(hardwareId))
+        {
+            hardwareId = NormalizeHardwareId(device.HardwareId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(hardwareId))
+        {
+            yield return "hardware:" + hardwareId;
+        }
+
+        var busId = (device.BusId ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(busId))
+        {
+            yield return "busid:" + busId;
+        }
     }
 
     private static string NormalizeHardwareId(string? hardwareId)

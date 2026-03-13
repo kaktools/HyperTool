@@ -14,7 +14,19 @@ public sealed class HyperVCheckpointTreeItem
 
     public string Name => Checkpoint.Name;
 
+    public string Description => string.IsNullOrWhiteSpace(Checkpoint.Description)
+        ? "-"
+        : Checkpoint.Description;
+
     public DateTime Created => Checkpoint.Created;
+
+    public string CreatedDisplay => Checkpoint.Created == default
+        ? "-"
+        : Checkpoint.Created.ToString("dd.MM.yyyy - HH:mm:ss");
+
+    public string CurrentBadge => Checkpoint.IsCurrent ? "Aktuell" : string.Empty;
+
+    public string RowBackground => Checkpoint.IsCurrent ? "#2245A6FF" : "Transparent";
 
     public string Type => Checkpoint.Type;
 }

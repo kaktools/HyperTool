@@ -23,17 +23,26 @@ internal static class GuestLogger
 
     public static void Initialize(GuestLoggingSettings settings, bool debugEnabled = false)
     {
-        var directory = string.IsNullOrWhiteSpace(settings.DirectoryPath)
-            ? GuestConfigService.DefaultLogDirectory
-            : settings.DirectoryPath;
+        var configuredDirectory = (settings.DirectoryPath ?? string.Empty).Trim();
+        var directoryCandidates = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(configuredDirectory))
+        {
+            directoryCandidates.Add(configuredDirectory);
+        }
+
+        directoryCandidates.Add(GuestConfigService.DefaultLogDirectory);
+        directoryCandidates.Add(Path.Combine(AppContext.BaseDirectory, "logs"));
+        directoryCandidates.Add(Path.Combine(Path.GetTempPath(), "HyperTool", "Guest", "logs"));
+
+        var directory = SessionLogFileService.ResolveWritableDirectory(directoryCandidates);
 
         var fileName = string.IsNullOrWhiteSpace(settings.FileName)
             ? "hypertool-guest.log"
             : settings.FileName;
 
-        Directory.CreateDirectory(directory);
         SessionLogFileService.CleanupOldLogFiles(directory, LogRetentionPeriod);
-        _logFilePath = SessionLogFileService.CreateSessionLogFilePath(directory, fileName);
+        _logFilePath = Path.Combine(directory, fileName);
         _echoToConsole = settings.EchoToConsole;
         _debugEnabled = debugEnabled;
 
@@ -76,18 +85,44 @@ internal static class GuestLogger
             return;
         }
 
-        var entry = new Dictionary<string, object?>
+        var levelToken = level.Trim().ToUpperInvariant() switch
         {
-            ["timestampUtc"] = DateTime.UtcNow,
-            ["level"] = level,
-            ["event"] = eventName,
-            ["message"] = message,
-            ["machine"] = Environment.MachineName,
-            ["processId"] = Environment.ProcessId,
-            ["data"] = data
+            "INFO" => "INF",
+            "WARN" => "WRN",
+            "ERROR" => "ERR",
+            "DEBUG" => "DBG",
+            _ => "INF"
         };
 
-        var line = JsonSerializer.Serialize(entry, SerializerOptions);
+        var timestamp = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz");
+        var safeMessage = (message ?? string.Empty).Trim();
+        var safeEventName = (eventName ?? string.Empty).Trim();
+
+        var lineBuilder = new StringBuilder();
+        lineBuilder.Append(timestamp);
+        lineBuilder.Append(" [");
+        lineBuilder.Append(levelToken);
+        lineBuilder.Append("] ");
+        lineBuilder.Append(safeMessage);
+
+        if (!string.IsNullOrWhiteSpace(safeEventName))
+        {
+            lineBuilder.Append(" (event=");
+            lineBuilder.Append(safeEventName);
+            lineBuilder.Append(')');
+        }
+
+        if (data is not null)
+        {
+            var dataJson = JsonSerializer.Serialize(data, SerializerOptions);
+            if (!string.IsNullOrWhiteSpace(dataJson))
+            {
+                lineBuilder.Append(" | ");
+                lineBuilder.Append(dataJson);
+            }
+        }
+
+        var line = lineBuilder.ToString();
 
         lock (Sync)
         {
@@ -98,10 +133,10 @@ internal static class GuestLogger
 
             if (_echoToConsole)
             {
-                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {level} {eventName}: {message}");
+                Console.WriteLine(line);
             }
 
-            EntryWritten?.Invoke($"[{DateTime.Now:HH:mm:ss}] [{level}] {message}");
+            EntryWritten?.Invoke(line);
         }
     }
 }

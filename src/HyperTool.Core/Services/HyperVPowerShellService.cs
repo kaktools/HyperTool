@@ -911,7 +911,7 @@ public sealed class HyperVPowerShellService : IHyperVService
 
     public async Task<IReadOnlyList<HyperVCheckpointInfo>> GetCheckpointsAsync(string vmName, CancellationToken cancellationToken)
     {
-        var script = $"$vm = Get-VM -Name {ToPsSingleQuoted(vmName)} -ErrorAction SilentlyContinue; $currentSnapshotId = ''; if ($null -ne $vm -and $null -ne $vm.ParentSnapshotId) {{ $currentSnapshotId = $vm.ParentSnapshotId.ToString() }}; @(Get-VMCheckpoint -VMName {ToPsSingleQuoted(vmName)} | ForEach-Object {{ $id = if ($null -ne $_.VMCheckpointId) {{ $_.VMCheckpointId.ToString() }} elseif ($null -ne $_.Id) {{ $_.Id.ToString() }} else {{ '' }}; $parentId = ''; if ($null -ne $_.ParentCheckpointId) {{ $parentId = $_.ParentCheckpointId.ToString() }} elseif ($null -ne $_.Parent -and $null -ne $_.Parent.VMCheckpointId) {{ $parentId = $_.Parent.VMCheckpointId.ToString() }}; $isCurrent = $false; if ($null -ne $_.IsCurrentSnapshot) {{ $isCurrent = [bool]$_.IsCurrentSnapshot }}; if (-not $isCurrent -and -not [string]::IsNullOrWhiteSpace($currentSnapshotId) -and -not [string]::IsNullOrWhiteSpace($id) -and $id -ceq $currentSnapshotId) {{ $isCurrent = $true }}; [pscustomobject]@{{ Id = $id; ParentId = $parentId; IsCurrent = $isCurrent; Name = if ($null -ne $_.Name) {{ $_.Name }} else {{ '' }}; CreationTime = if ($null -ne $_.CreationTime) {{ $_.CreationTime.ToString('o') }} else {{ '' }}; CheckpointType = if ($null -ne $_.CheckpointType) {{ $_.CheckpointType.ToString() }} else {{ '' }} }} }}) | ConvertTo-Json -Depth 4 -Compress";
+        var script = $"$vm = Get-VM -Name {ToPsSingleQuoted(vmName)} -ErrorAction SilentlyContinue; $currentSnapshotId = ''; if ($null -ne $vm -and $null -ne $vm.ParentSnapshotId) {{ $currentSnapshotId = $vm.ParentSnapshotId.ToString() }}; @(Get-VMCheckpoint -VMName {ToPsSingleQuoted(vmName)} | ForEach-Object {{ $id = if ($null -ne $_.VMCheckpointId) {{ $_.VMCheckpointId.ToString() }} elseif ($null -ne $_.Id) {{ $_.Id.ToString() }} else {{ '' }}; $parentId = ''; if ($null -ne $_.ParentCheckpointId) {{ $parentId = $_.ParentCheckpointId.ToString() }} elseif ($null -ne $_.Parent -and $null -ne $_.Parent.VMCheckpointId) {{ $parentId = $_.Parent.VMCheckpointId.ToString() }}; $isCurrent = $false; if ($null -ne $_.IsCurrentSnapshot) {{ $isCurrent = [bool]$_.IsCurrentSnapshot }}; if (-not $isCurrent -and -not [string]::IsNullOrWhiteSpace($currentSnapshotId) -and -not [string]::IsNullOrWhiteSpace($id) -and $id -ceq $currentSnapshotId) {{ $isCurrent = $true }}; $description = ''; if ($null -ne $_.PSObject.Properties['Notes'] -and $null -ne $_.Notes) {{ $description = [string]$_.Notes }} elseif ($null -ne $_.PSObject.Properties['Description'] -and $null -ne $_.Description) {{ $description = [string]$_.Description }}; [pscustomobject]@{{ Id = $id; ParentId = $parentId; IsCurrent = $isCurrent; Name = if ($null -ne $_.Name) {{ $_.Name }} else {{ '' }}; Description = $description; CreationTime = if ($null -ne $_.CreationTime) {{ $_.CreationTime.ToString('o') }} else {{ '' }}; CheckpointType = if ($null -ne $_.CheckpointType) {{ $_.CheckpointType.ToString() }} else {{ '' }} }} }}) | ConvertTo-Json -Depth 4 -Compress";
 
         var rows = await InvokeJsonArrayAsync(script, cancellationToken);
         return rows.Select(row => new HyperVCheckpointInfo
@@ -920,6 +920,7 @@ public sealed class HyperVPowerShellService : IHyperVService
             ParentId = GetString(row, "ParentId"),
             IsCurrent = GetBoolean(row, "IsCurrent"),
             Name = GetString(row, "Name"),
+            Description = GetString(row, "Description"),
             Created = GetDateTime(row, "CreationTime"),
             Type = GetString(row, "CheckpointType")
         }).ToList();
@@ -927,15 +928,34 @@ public sealed class HyperVPowerShellService : IHyperVService
 
     public async Task CreateCheckpointAsync(string vmName, string checkpointName, string? description, CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(description))
-        {
-            Log.Information("Checkpoint description currently informational only for VM {VmName}: {Description}", vmName, description);
-        }
+        var vmNameQuoted = ToPsSingleQuoted(vmName);
+        var checkpointNameQuoted = ToPsSingleQuoted(checkpointName);
+        var descriptionText = string.IsNullOrWhiteSpace(description) ? string.Empty : description.Trim();
+        var descriptionQuoted = ToPsSingleQuoted(descriptionText);
+        var setDescriptionScript =
+            "$description = " + descriptionQuoted + "; " +
+            "if (-not [string]::IsNullOrWhiteSpace($description)) { " +
+            "$checkpoint = Get-VMCheckpoint -VMName $vmName | Where-Object { $_.Name -ceq $checkpointName } | Sort-Object CreationTime -Descending | Select-Object -First 1; " +
+            "if ($null -ne $checkpoint) { " +
+            "$setVmCheckpointCmd = Get-Command -Name Set-VMCheckpoint -ErrorAction SilentlyContinue; " +
+            "if ($null -ne $setVmCheckpointCmd -and $setVmCheckpointCmd.Parameters.ContainsKey('Notes')) { " +
+            "Set-VMCheckpoint -VMCheckpoint $checkpoint -Notes $description -Confirm:$false -ErrorAction SilentlyContinue; " +
+            "} else { " +
+            "$setVmSnapshotCmd = Get-Command -Name Set-VMSnapshot -ErrorAction SilentlyContinue; " +
+            "if ($null -ne $setVmSnapshotCmd -and $setVmSnapshotCmd.Parameters.ContainsKey('Notes')) { " +
+            "Set-VMSnapshot -VMCheckpoint $checkpoint -Notes $description -Confirm:$false -ErrorAction SilentlyContinue; " +
+            "} " +
+            "} " +
+            "} " +
+            "}";
 
         try
         {
             await InvokeNonQueryAsync(
-                $"Checkpoint-VM -VMName {ToPsSingleQuoted(vmName)} -SnapshotName {ToPsSingleQuoted(checkpointName)} -Confirm:$false",
+                "$vmName = " + vmNameQuoted + "; " +
+                "$checkpointName = " + checkpointNameQuoted + "; " +
+                "Checkpoint-VM -VMName $vmName -SnapshotName $checkpointName -Confirm:$false; " +
+                setDescriptionScript,
                 cancellationToken);
         }
         catch (InvalidOperationException ex) when (IsProductionCheckpointError(ex.Message))
@@ -944,14 +964,14 @@ public sealed class HyperVPowerShellService : IHyperVService
                 "Production checkpoint creation failed for VM {VmName}. Retrying once with temporary Standard checkpoint type.",
                 vmName);
 
-            var vmNameQuoted = ToPsSingleQuoted(vmName);
-            var checkpointNameQuoted = ToPsSingleQuoted(checkpointName);
             var fallbackScript = $"$vmName = {vmNameQuoted}; " +
+                                 $"$checkpointName = {checkpointNameQuoted}; " +
                                  "$vm = Get-VM -Name $vmName; " +
                                  "$originalType = $vm.CheckpointType; " +
                                  "try { " +
                                  "Set-VM -Name $vmName -CheckpointType Standard; " +
-                                 $"Checkpoint-VM -VMName $vmName -SnapshotName {checkpointNameQuoted} -Confirm:$false; " +
+                                 "Checkpoint-VM -VMName $vmName -SnapshotName $checkpointName -Confirm:$false; " +
+                                 setDescriptionScript +
                                  "} finally { " +
                                  "if ($null -ne $originalType) { Set-VM -Name $vmName -CheckpointType $originalType } " +
                                  "}";

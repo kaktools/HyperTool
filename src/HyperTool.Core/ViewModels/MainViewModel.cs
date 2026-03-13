@@ -457,6 +457,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly Dictionary<string, VmResourceMonitorRuntimeState> _vmMonitorStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<double> _hostCpuHistory = new();
     private readonly Queue<double> _hostRamPressureHistory = new();
+    private readonly Dictionary<string, string> _checkpointDescriptionOverridesByKey = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HttpClient UpdateDownloadClient = new();
     private int _uiNumLockWatcherIntervalSeconds = 30;
     private bool _lastAppliedDebugLoggingEnabled;
@@ -1959,7 +1960,10 @@ public partial class MainViewModel : ViewModelBase
                 return;
             }
 
-            var preparedDevices = devices.ToList();
+            var preparedDevices = devices
+                .OrderBy(device => device.BusId, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(device => device.Description, StringComparer.OrdinalIgnoreCase)
+                .ToList();
             TryMigrateLegacyUsbIdentityKeys(preparedDevices);
             foreach (var device in preparedDevices)
             {
@@ -1968,7 +1972,7 @@ public partial class MainViewModel : ViewModelBase
 
                 if (device.IsAttached
                     && !string.IsNullOrWhiteSpace(device.BusId)
-                    && UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device.BusId, _usbAutoDetachGracePeriod, out var guestComputerName))
+                    && UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device, _usbAutoDetachGracePeriod, out var guestComputerName))
                 {
                     device.AttachedGuestComputerName = guestComputerName;
                 }
@@ -1976,10 +1980,20 @@ public partial class MainViewModel : ViewModelBase
 
             if (!UsbDeviceListsMatch(UsbDevices, preparedDevices))
             {
-                UsbDevices.Clear();
-                foreach (var device in preparedDevices)
+                if (UsbDeviceIdentityOrderMatch(UsbDevices, preparedDevices))
                 {
-                    UsbDevices.Add(device);
+                    for (var i = 0; i < preparedDevices.Count; i++)
+                    {
+                        UsbDevices[i] = preparedDevices[i];
+                    }
+                }
+                else
+                {
+                    UsbDevices.Clear();
+                    foreach (var device in preparedDevices)
+                    {
+                        UsbDevices.Add(device);
+                    }
                 }
             }
 
@@ -1987,9 +2001,7 @@ public partial class MainViewModel : ViewModelBase
                 !string.IsNullOrWhiteSpace(previouslySelectedSelectionKey)
                 && string.Equals(BuildUsbSelectionKey(device), previouslySelectedSelectionKey, StringComparison.OrdinalIgnoreCase));
 
-            SelectedUsbDevice = hadPreviousSelection
-                ? restoredSelection
-                : UsbDevices.FirstOrDefault();
+            SelectedUsbDevice = hadPreviousSelection ? restoredSelection : null;
 
             UsbStatusText = UsbDevices.Count == 0
                 ? "Keine USB-Geräte gefunden."
@@ -2096,6 +2108,11 @@ public partial class MainViewModel : ViewModelBase
             }
             catch (Exception ex)
             {
+                if (IsBenignUsbUnshareCleanupFailure(ex))
+                {
+                    continue;
+                }
+
                 Log.Debug(ex,
                     "USB share cleanup for removed device failed. BusId={BusId}; Guid={Guid}",
                     removed.BusId,
@@ -2109,6 +2126,18 @@ public partial class MainViewModel : ViewModelBase
         }
 
         return releasedCount;
+    }
+
+    private static bool IsBenignUsbUnshareCleanupFailure(Exception ex)
+    {
+        if (ex is not InvalidOperationException)
+        {
+            return false;
+        }
+
+        var message = ex.Message ?? string.Empty;
+        return message.Contains("konnte nicht entfernt werden", StringComparison.OrdinalIgnoreCase)
+               && message.Contains("ExitCode=1", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<int> TryDetachStaleAttachedDevicesWithoutGuestAckAsync(IReadOnlyList<UsbIpDeviceInfo> devices, CancellationToken token)
@@ -2159,9 +2188,10 @@ public partial class MainViewModel : ViewModelBase
                 _usbAutoDetachRetryAttempts,
                 (loopbackAttached || guestManaged) ? LoopbackManagedUsbDetachRetryFloor : 2);
 
-            // If diagnostics ACK delivery is currently unhealthy, do not progress stale-detach state.
-            // This prevents false host detaches during temporary Hyper-V socket / diagnostics outages.
-            if (!guestAckChannelHealthy)
+            // If diagnostics ACK delivery is currently unhealthy, avoid stale progression only for
+            // generic non-loopback devices. Loopback / guest-managed devices must still recover
+            // after VM power-off without a clean usb-disconnected ACK.
+            if (!guestAckChannelHealthy && !loopbackAttached && !guestManaged && !forceDetachFallback)
             {
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
                 _usbAttachedWithoutAckAttempts.Remove(busId);
@@ -2285,13 +2315,49 @@ public partial class MainViewModel : ViewModelBase
             anyVmRunning = AvailableVms.Any(vm => IsRunningState(vm.RuntimeState));
         }
 
-        if (anyVmRunning)
+        var runningVmNames = new HashSet<string>(
+            AvailableVms
+                .Where(vm => IsRunningState(vm.RuntimeState))
+                .Select(vm => (vm.Name ?? string.Empty).Trim())
+                .Where(static name => !string.IsNullOrWhiteSpace(name)),
+            StringComparer.OrdinalIgnoreCase);
+
+        var targetBusIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var device in devices)
+        {
+            if (!device.IsAttached
+                || string.IsNullOrWhiteSpace(device.BusId)
+                || !string.Equals(device.ClientIpAddress?.Trim(), HyperVSocketUsbTunnelDefaults.LoopbackAddress, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var busId = device.BusId.Trim();
+            var attachedGuest = (device.AttachedGuestComputerName ?? string.Empty).Trim();
+
+            if (!string.IsNullOrWhiteSpace(attachedGuest))
+            {
+                if (!runningVmNames.Contains(attachedGuest))
+                {
+                    targetBusIds.Add(busId);
+                }
+
+                continue;
+            }
+
+            if (!anyVmRunning)
+            {
+                targetBusIds.Add(busId);
+            }
+        }
+
+        if (targetBusIds.Count == 0)
         {
             return 0;
         }
 
         var detachedCount = 0;
-        foreach (var busId in loopbackAttachedBusIds)
+        foreach (var busId in targetBusIds)
         {
             try
             {
@@ -2326,6 +2392,24 @@ public partial class MainViewModel : ViewModelBase
         for (var i = 0; i < current.Count; i++)
         {
             if (!UsbDeviceVisualMatch(current[i], next[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool UsbDeviceIdentityOrderMatch(IList<UsbIpDeviceInfo> current, IReadOnlyList<UsbIpDeviceInfo> next)
+    {
+        if (current.Count != next.Count)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < current.Count; i++)
+        {
+            if (!string.Equals(BuildUsbSelectionKey(current[i]), BuildUsbSelectionKey(next[i]), StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }
@@ -3415,6 +3499,7 @@ public partial class MainViewModel : ViewModelBase
         try
         {
             var checkpoints = await _hyperVService.GetCheckpointsAsync(vmName, _lifetimeCancellation.Token);
+            ApplyCheckpointDescriptionOverrides(vmName, checkpoints);
 
             if (SelectedVm is null
                 || !string.Equals(SelectedVm.Name, vmName, StringComparison.OrdinalIgnoreCase))
@@ -3470,21 +3555,100 @@ public partial class MainViewModel : ViewModelBase
         var checkpointName = string.IsNullOrWhiteSpace(NewCheckpointName)
             ? $"checkpoint-{DateTime.Now:yyyyMMdd-HHmmss}"
             : NewCheckpointName.Trim();
+        var checkpointDescription = (NewCheckpointDescription ?? string.Empty).Trim();
+        var vmName = SelectedVm.Name;
+        var createStartedUtc = DateTimeOffset.UtcNow;
 
         await ExecuteBusyActionAsync("Checkpoint wird erstellt...", async token =>
         {
             await _hyperVService.CreateCheckpointAsync(
-                SelectedVm.Name,
+                vmName,
                 checkpointName,
-                string.IsNullOrWhiteSpace(NewCheckpointDescription) ? null : NewCheckpointDescription.Trim(),
+                string.IsNullOrWhiteSpace(checkpointDescription) ? null : checkpointDescription,
                 token);
 
-            AddNotification($"Checkpoint '{checkpointName}' für '{SelectedVm.Name}' erstellt.", "Success");
+            AddNotification($"Checkpoint '{checkpointName}' für '{vmName}' erstellt.", "Success");
         });
 
         NewCheckpointName = string.Empty;
         NewCheckpointDescription = string.Empty;
         await LoadCheckpointsAsync();
+
+        if (!string.IsNullOrWhiteSpace(checkpointDescription))
+        {
+            TryApplyCheckpointDescriptionFallback(vmName, checkpointName, checkpointDescription, createStartedUtc);
+        }
+    }
+
+    private void ApplyCheckpointDescriptionOverrides(string vmName, IReadOnlyList<HyperVCheckpointInfo> checkpoints)
+    {
+        if (checkpoints.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var checkpoint in checkpoints)
+        {
+            if (!string.IsNullOrWhiteSpace(checkpoint.Description))
+            {
+                continue;
+            }
+
+            var key = BuildCheckpointDescriptionOverrideKey(vmName, checkpoint);
+            if (_checkpointDescriptionOverridesByKey.TryGetValue(key, out var description)
+                && !string.IsNullOrWhiteSpace(description))
+            {
+                checkpoint.Description = description;
+            }
+        }
+    }
+
+    private void TryApplyCheckpointDescriptionFallback(string vmName, string checkpointName, string description, DateTimeOffset createdAfterUtc)
+    {
+        if (string.IsNullOrWhiteSpace(vmName)
+            || string.IsNullOrWhiteSpace(checkpointName)
+            || string.IsNullOrWhiteSpace(description)
+            || AvailableCheckpoints.Count == 0)
+        {
+            return;
+        }
+
+        var candidate = AvailableCheckpoints
+            .Where(item => string.Equals(item.Name, checkpointName, StringComparison.Ordinal))
+            .Where(item => item.Created == default || item.Created >= createdAfterUtc.AddMinutes(-2).LocalDateTime)
+            .OrderByDescending(item => item.Created)
+            .FirstOrDefault();
+
+        if (candidate is null)
+        {
+            return;
+        }
+
+        var key = BuildCheckpointDescriptionOverrideKey(vmName, candidate);
+        _checkpointDescriptionOverridesByKey[key] = description;
+
+        if (string.IsNullOrWhiteSpace(candidate.Description))
+        {
+            candidate.Description = description;
+        }
+
+        RebuildCheckpointTree(AvailableCheckpoints.ToList());
+        SelectedCheckpointNode = FindCheckpointNodeById(candidate.Id);
+        SelectedCheckpoint = candidate;
+    }
+
+    private static string BuildCheckpointDescriptionOverrideKey(string vmName, HyperVCheckpointInfo checkpoint)
+    {
+        var normalizedVm = (vmName ?? string.Empty).Trim();
+        var checkpointId = (checkpoint.Id ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(checkpointId))
+        {
+            return normalizedVm + "|id:" + checkpointId;
+        }
+
+        var name = (checkpoint.Name ?? string.Empty).Trim();
+        var created = checkpoint.Created == default ? string.Empty : checkpoint.Created.ToString("o");
+        return normalizedVm + "|name:" + name + "|created:" + created;
     }
 
     private async Task ApplyCheckpointAsync()

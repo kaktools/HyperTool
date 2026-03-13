@@ -4,13 +4,13 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.4.8**
-- USB-Dongle-Share wurde fuer produktive Nutzung weiter gehaertet (Guest/Host), inklusive konservativerem Verhalten bei Transportstoerungen.
-- Guest behandelt `already exported` jetzt sauberer: Heartbeat nur bei tatsaechlich erkanntem Attach, damit stale Exports auf dem Host korrekt bereinigt werden koennen.
-- Hyper-V-Socket Self-Heal im Guest ist weniger aggressiv (hoeherer Schwellwert, laengeres Backoff) und wird bei aktiv attached USB bewusst ausgesetzt.
-- Guest-USB-Auto-Refresh wurde adaptiv optimiert (weniger Hintergrundlast bei verbundenem Dongle, weniger Debug-Log-Spam bei stillen Polling-Zyklen).
-- Host Resource-Monitoring ist UI-thread-sicher gehaertet (Fix fuer COMException `0x8001010E`), inkl. robusterem Failure-Handling und rate-limitiertem Logging.
-- Host stale-auto-detach fuer guest-gemanagte/loopback-nahe Attachments wurde konservativer abgestimmt, um transiente ACK-Luecken besser zu tolerieren.
+- Version: **v2.5.0**
+- USB Multi-VM Status ist konsistenter: Guest zeigt Geraete bei Attach in anderen VMs jetzt als `Busy` statt faelschlich als verfuegbar.
+- Host->Guest Identity-Payload wurde um USB-Attachment-Daten erweitert, damit Guest-Status und Auto-Connect-Entscheidungen VM-uebergreifend korrekt bleiben.
+- Snapshot-Ansicht wurde stabilisiert: Name/Beschreibung/Datum wieder sichtbar, `Aktuell`-Markierung klarer, und Beschreibungen aus Create-Dialog werden zuverlaessiger uebernommen.
+- Host USB-Liste aktualisiert in-place mit stabilerer Reihenfolge, dadurch weniger visuelles Flackern bei Refresh/Status-Updates.
+- Guest Bottom-Notifications sind kompakter (ohne `(event=...) | {json}`), waehrend Detail-Logs in der Logdatei erhalten bleiben.
+- First-Start USB-Migrationshinweis ist jetzt sauber auf Update-Faelle begrenzt: alte USB-Eintraege werden einmalig entfernt und muessen neu gesetzt werden.
 
 ## Projekte
 
@@ -115,23 +115,23 @@ Legacy-Hinweis für Guestx86:
 ### Host
 
 - build-host.bat
-- build-installer-host.bat version=2.4.8
+- build-installer-host.bat version=2.5.0
 
 ### Guest
 
 - build-guest.bat
-- build-installer-guest.bat version=2.4.8
+- build-installer-guest.bat version=2.5.0
 
 ### Guestx86 (Legacy WPF)
 
 - build-guestx86.bat
 - build_guestx86.bat
-- build_installer_guestx86.bat version=2.4.8
+- build_installer_guestx86.bat version=2.5.0
 
 ### Komplett
 
 - build-all.bat
-- build-all.bat version=2.4.8 host guest host-installer guest-installer no-pause
+- build-all.bat version=2.5.0 host guest host-installer guest-installer no-pause
 
 Ausgaben:
 

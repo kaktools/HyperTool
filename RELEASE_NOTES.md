@@ -1,5 +1,46 @@
 # HyperTool Release Notes
 
+## v2.5.0
+
+### Highlights
+
+- USB Multi-VM Verhalten wurde end-to-end stabilisiert: Guest kann jetzt verlaesslich erkennen, wenn ein USB-Geraet in einer anderen VM attached ist (`Busy`).
+- Snapshot-Ansicht in der Host-App ist wieder voll nutzbar mit sichtbaren Zeileninhalten (Name/Beschreibung/Datum) und klarerer `Aktuell`-Markierung.
+- Guest-Benachrichtigungen unten in der UI wurden auf kompakte, lesbare Zeilen reduziert, ohne Verlust der Detailinfos in den Datei-Logs.
+- USB-Reset-Migration beim Guest ist jetzt als sauberer First-Start-Flow fuer Update-Installationen umgesetzt.
+
+### Verbessert
+
+- Guest USB Status/Konsistenz:
+	- Host-Identity-Refresh laeuft robuster in den USB-Refresh-Pfaden.
+	- Host-Payload enthaelt jetzt `usbDeviceAttachments`, damit Guest den echten VM-uebergreifenden Attach-Zustand kennt.
+	- Statusabbildung zeigt bei Attach in anderer VM `Busy` statt irrefuehrend `Available`/`Attached`.
+- Host USB Refresh/UI:
+	- USB-Liste wird bei unveraenderter Identitaetsreihenfolge in-place aktualisiert.
+	- Sichtbares Flackern bei periodischen Refreshes deutlich reduziert.
+- Snapshot UX:
+	- Baumzeilen-Template korrigiert, Inhalte wieder sichtbar.
+	- `Aktuell`-Badge/Highlighting klarer positioniert.
+	- Beschreibungen aus Snapshot-Create-Flow werden zuverlaessiger gehalten (inkl. Fallback, falls Hyper-V Notes nicht direkt persistieren).
+- Host Detach Recovery:
+	- Auto-Detach fuer stale USB-Attachments robuster bei Hard-Off/unklarem ACK-Zustand.
+	- Loopback-/guest-gemanagte Sonderfaelle konservativer behandelt, um unnoetiges Churn zu vermeiden.
+- Guest Logging/Notification UX:
+	- Datei-Logging auf stabile Einzeldatei konsolidiert (kein Session-Datei-Spam).
+	- Notification-Panel entfernt fuer Logger-Zeilen zusaetzliche `(event=...)` und JSON-Payload-Suffixe fuer bessere Lesbarkeit.
+
+### Behoben
+
+- Snapshot-Zeilen konnten nach vorherigen UI-Aenderungen ohne sichtbaren Text erscheinen.
+- Guest konnte USB-Geraete in Multi-VM-Szenarien teilweise als verfuegbar anzeigen, obwohl sie in anderer VM attached waren.
+- Host stale-detach konnte nach unsauberem VM-Shutdown zu lange ausbleiben.
+- Guest Notification-Bereich zeigte zu viele technische Detailanhaenge statt kurzer Statusmeldungen.
+- USB-Migrationshinweis konnte unpassend auch bei frischer Neuinstallation erscheinen; jetzt nur noch fuer Update-Pfade.
+
+### Doku
+
+- README auf `v2.5.0` aktualisiert (Release-Stand + Build-Beispiele + aktuelle USB/Snapshot/Notification-Verbesserungen).
+
 ## v2.4.8
 
 ### Highlights

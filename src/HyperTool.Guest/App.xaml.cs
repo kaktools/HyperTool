@@ -24,8 +24,10 @@ public sealed partial class App : Application
 {
     private const int GuestUsbAutoRefreshFastSeconds = 20;
     private const int GuestUsbAutoRefreshSlowSeconds = 30;
+    private const int GuestUsbAutoRefreshNoAutoConnectSeconds = 10;
     private const int GuestUsbAttachedBackgroundRefreshSeconds = 30;
     private const int GuestHostIdentityBackgroundRefreshSeconds = 30;
+    private const int GuestHostIdentityUsbRefreshSeconds = 8;
     private const int GuestUsbAutoConnectFailureBackoffSeconds = 20;
     private const int GuestUsbHeartbeatIntervalSeconds = 45;
     private const int HyperVProbeGraceAfterDataPathSuccessSeconds = 180;
@@ -2187,6 +2189,24 @@ public sealed partial class App : Application
             var useRemoteHostList = !string.IsNullOrWhiteSpace(hostResolution.ResolvedIpv4);
             var fallbackToIpUsed = false;
             string? fallbackHostAddress = null;
+
+            if (useRemoteHostList
+                && (DateTimeOffset.UtcNow - _lastHostIdentityBackgroundAttemptUtc) >= TimeSpan.FromSeconds(GuestHostIdentityUsbRefreshSeconds))
+            {
+                _lastHostIdentityBackgroundAttemptUtc = DateTimeOffset.UtcNow;
+                try
+                {
+                    var identity = await FetchHostIdentityViaHyperVSocketAsync(CancellationToken.None);
+                    if (identity is not null)
+                    {
+                        ApplyHostIdentityToConfig(identity, persistConfig: false);
+                    }
+                }
+                catch
+                {
+                }
+            }
+
             if (useRemoteHostList)
             {
                 try
@@ -2276,6 +2296,11 @@ public sealed partial class App : Application
                 {
                     list = await _usbService.GetDevicesAsync(CancellationToken.None);
                 }
+            }
+
+            foreach (var device in list)
+            {
+                ApplyHostUsbMetadata(device);
             }
 
             var hasUsbListChanged = !UsbDeviceListsMatch(_usbDevices, list);
@@ -3532,7 +3557,7 @@ public sealed partial class App : Application
                     }
                 }
 
-                if (!_isExitRequested && _isUsbClientAvailable && _config?.Usb?.Enabled != false && HasConfiguredUsbAutoConnect())
+                if (!_isExitRequested && _isUsbClientAvailable && _config?.Usb?.Enabled != false)
                 {
                     var shouldRunBackgroundUsbRefresh = !hasAttachedDevice
                         || (DateTimeOffset.UtcNow - _lastUsbBackgroundRefreshAttemptUtc) >= TimeSpan.FromSeconds(GuestUsbAttachedBackgroundRefreshSeconds);
@@ -3573,7 +3598,7 @@ public sealed partial class App : Application
 
         if (!HasConfiguredUsbAutoConnect())
         {
-            return GuestUsbAutoRefreshSlowSeconds;
+            return GuestUsbAutoRefreshNoAutoConnectSeconds;
         }
 
         var hasAttachedDevice = HasAttachedUsbDevice();
@@ -3972,13 +3997,17 @@ public sealed partial class App : Application
             var beforeCustomName = usb.CustomName;
             var beforeCustomComment = usb.CustomComment;
             var beforeIdentityKey = usb.DeviceIdentityKey;
+            var beforeAttachedGuest = usb.AttachedGuestComputerName;
+            var beforeClientIp = usb.ClientIpAddress;
 
             ApplyHostUsbMetadata(usb);
 
             if (!string.Equals(beforeDescription, usb.Description, StringComparison.Ordinal)
                 || !string.Equals(beforeCustomName, usb.CustomName, StringComparison.Ordinal)
                 || !string.Equals(beforeCustomComment, usb.CustomComment, StringComparison.Ordinal)
-                || !string.Equals(beforeIdentityKey, usb.DeviceIdentityKey, StringComparison.OrdinalIgnoreCase))
+                || !string.Equals(beforeIdentityKey, usb.DeviceIdentityKey, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(beforeAttachedGuest, usb.AttachedGuestComputerName, StringComparison.Ordinal)
+                || !string.Equals(beforeClientIp, usb.ClientIpAddress, StringComparison.OrdinalIgnoreCase))
             {
                 usbVisualChanged = true;
             }
@@ -4365,6 +4394,8 @@ public sealed partial class App : Application
 
     private void ApplyHostUsbAttachmentHint(UsbIpDeviceInfo device)
     {
+        device.IsAttachedByOtherGuest = false;
+
         var busId = (device.BusId ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(busId))
         {
@@ -4381,6 +4412,9 @@ public sealed partial class App : Application
         var isLikelyLocalAttachment = device.IsAttached
             && (string.IsNullOrWhiteSpace(device.AttachedGuestComputerName)
                 || string.Equals(device.AttachedGuestComputerName, Environment.MachineName, StringComparison.OrdinalIgnoreCase));
+
+        device.IsAttachedByOtherGuest = !isLikelyLocalAttachment
+            && !string.IsNullOrWhiteSpace(attachedGuest);
 
         if (string.IsNullOrWhiteSpace(device.AttachedGuestComputerName)
             || !isLikelyLocalAttachment)
@@ -4739,7 +4773,9 @@ public sealed partial class App : Application
                 {
                     GuestComputerName = Environment.MachineName,
                     BusId = busId.Trim(),
-                    HardwareId = currentDevice?.HardwareId,
+                    HardwareId = !string.IsNullOrWhiteSpace(currentDevice?.HardwareIdentityKey)
+                        ? currentDevice!.HardwareIdentityKey
+                        : currentDevice?.HardwareId,
                     InstanceId = currentDevice?.InstanceId,
                     PersistedGuid = currentDevice?.PersistedGuid,
                     EventType = eventType.Trim(),

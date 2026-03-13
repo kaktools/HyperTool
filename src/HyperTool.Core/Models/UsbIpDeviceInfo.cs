@@ -24,6 +24,8 @@ public sealed class UsbIpDeviceInfo
 
     public string CustomComment { get; set; } = string.Empty;
 
+    public bool IsAttachedByOtherGuest { get; set; }
+
     public bool IsConnected => !string.IsNullOrWhiteSpace(InstanceId);
 
     public bool IsRemoteAvailable => !string.IsNullOrWhiteSpace(BusId)
@@ -46,6 +48,11 @@ public sealed class UsbIpDeviceInfo
 
             if (IsAttached)
             {
+                if (IsAttachedByOtherGuest)
+                {
+                    return "Busy";
+                }
+
                 return "Attached";
             }
 
