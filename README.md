@@ -4,12 +4,11 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.5.2**
-- USB-Transport im Guest ist robuster gegen kurzzeitige Hyper-V-Socket-Abbrüche und wechselt nicht mehr so aggressiv auf IP-Fallback.
-- Hyper-V-Fehlerbehandlung für USB-Refresh wurde erweitert (mehr transiente Fehlerbilder + gestaffelte Retries vor Fallback).
-- Logging in Host und Guest ist konsistent als Session-Log mit Zeitstempel je App-Start umgesetzt.
-- Bei aktiviertem Debug-Logging wird die Logdatei eindeutig mit `-Debug` gekennzeichnet.
-- Logbereinigung ist robuster: Dateien älter als 3 Tage werden zuverlässiger entfernt (inklusive schreibgeschützter Dateien).
+- Version: **v2.5.4**
+- Snapshot-Beschreibungen bleiben nach Reload/Neustart erhalten (persistente Override-Speicherung im Host).
+- Host-USB-Auto-Detach nutzt jetzt eine klare Trigger-Policy: nur bei Guest-Disconnect oder wenn die zugehörige VM-ID mindestens 10 Sekunden nicht läuft.
+- In der Host-USB-Leiste gibt es einen dedizierten `Detach`-Button direkt neben `Share` und `Unshare`.
+- Der UI-Schalter für automatisches Detach wurde entfernt; die Option ist weiterhin per Config steuerbar.
 
 ## Projekte
 
@@ -27,7 +26,7 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 - Netzwerk: adaptergenaues Switch-Handling (auch Multi-NIC).
 - Host-Network-Details: klare Status-Chips für `Gateway` (grün) und `Default Switch` (orange), dark/light lesbar.
 - Snapshots: Baumdarstellung mit Restore/Delete/Create.
-- USB: Refresh, Share, Unshare über usbipd.
+- USB: Refresh, Share, Unshare und Detach über usbipd.
 - Tray Control Center: usbipd-Dienststatus (grün/rot), kompakter USB-Bereich und Installationsbutton bei fehlendem usbipd-win.
 - Tray + Control Center mit Schnellaktionen.
 - In-App Updatecheck und Installer-Update.
@@ -109,6 +108,7 @@ Relevante UI-Schalter:
 Versteckte/erweiterte Option (nur per `HyperTool.config.json`):
 
 - ui.numLockWatcherIntervalSeconds (Default: `30`, Bereich: `5..600`)
+- usb.autoDetachOnClientDisconnect (Default: `true`)
 
 ### Shared-Folder Transport (Guest)
 

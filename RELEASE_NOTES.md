@@ -1,5 +1,35 @@
 # HyperTool Release Notes
 
+## v2.5.4
+
+### Highlights
+
+- Snapshot-Beschreibungen bleiben jetzt auch nach App-Neustart und Reload zuverlässig erhalten.
+- USB-Auto-Detach im Host wurde auf einen klaren, deterministischen Ablauf reduziert: nur bei Guest-Disconnect-Event oder wenn die zugehörige VM (per VM-ID) mindestens 10 Sekunden nicht läuft.
+- USB-UI im Host ist eindeutiger: eigener `Detach`-Button direkt neben `Share` und `Unshare`; der Auto-Detach-Schalter wurde aus der Oberfläche entfernt.
+
+### Verbessert
+
+- Snapshot-Persistenz:
+	- Checkpoint-Beschreibungs-Overrides werden in der Host-Konfiguration gespeichert und beim Laden korrekt wiederhergestellt.
+	- Das verhindert das bisherige "Beschreibung verschwindet nach Neustart"-Verhalten.
+- Host USB Detach-Policy:
+	- Zyklische Guest-ACK-/Liveness-basierte Auto-Detach-Heuristiken wurden entfernt.
+	- Auto-Detach ist auf explizite Trigger beschränkt (`usb-disconnected` oder VM-ID nicht Running >= 10s).
+	- Bei fehlgeschlagenem Auto-Detach bleibt der manuelle Weg (`Detach`/`Unshare`) als kontrollierter Fallback erhalten.
+- Host USB UX:
+	- Neuer `Detach`-Button in der Aktionsleiste (neben `Share`/`Unshare`).
+	- Einstellung `Automatisches Detach nach Disconnect` ist nicht mehr per UI umschaltbar und wird nur noch über die Config gesteuert.
+
+### Behoben
+
+- Snapshot-Beschreibungen gingen nach Reload/Neustart verloren, obwohl der Snapshot selbst vorhanden war.
+- USB-Stale-Recovery reagierte in Grenzfällen zu aggressiv durch zyklische Liveness-Logik; die Detach-Entscheidung folgt jetzt nur noch den klar definierten Triggern.
+
+### Doku
+
+- README auf `v2.5.4` aktualisiert (Release-Stand, USB-Detach-Verhalten, Config-Hinweis).
+
 ## v2.5.2
 
 ### Highlights
