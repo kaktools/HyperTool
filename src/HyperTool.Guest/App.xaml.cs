@@ -1264,7 +1264,7 @@ public sealed partial class App : Application
         _mainWindow = new GuestMainWindow(
             _config,
             RefreshUsbDevicesAsync,
-            ConnectUsbAsync,
+            busId => ConnectUsbAsync(busId),
             DisconnectUsbAsync,
             SaveConfigAsync,
             ReloadConfigSnapshotAsync,
@@ -1641,7 +1641,7 @@ public sealed partial class App : Application
             var nextWindow = new GuestMainWindow(
                 _config,
                 RefreshUsbDevicesAsync,
-                ConnectUsbAsync,
+                busId => ConnectUsbAsync(busId),
                 DisconnectUsbAsync,
                 SaveConfigAsync,
                 ReloadConfigSnapshotAsync,
@@ -2186,6 +2186,10 @@ public sealed partial class App : Application
 
         ApplyUsbTransportResolution(hostResolution);
         var previousCount = _usbDevices.Count;
+        var previouslyAttachedBusIds = _usbDevices
+            .Where(device => IsGuestLocalAttachedDevice(device) && !string.IsNullOrWhiteSpace(device.BusId))
+            .Select(device => device.BusId.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var fallbackToIpUsedForLog = false;
         string? fallbackReason = null;
         string? fallbackExceptionType = null;
@@ -2318,6 +2322,38 @@ public sealed partial class App : Application
             foreach (var device in list)
             {
                 ApplyHostUsbMetadata(device);
+            }
+
+            if (previouslyAttachedBusIds.Count > 0)
+            {
+                var currentlyAttachedBusIds = list
+                    .Where(device => IsGuestLocalAttachedDevice(device) && !string.IsNullOrWhiteSpace(device.BusId))
+                    .Select(device => device.BusId.Trim())
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var lostAttachedBusIds = previouslyAttachedBusIds
+                    .Where(busId => !currentlyAttachedBusIds.Contains(busId))
+                    .ToList();
+
+                if (lostAttachedBusIds.Count > 0)
+                {
+                    foreach (var lostBusId in lostAttachedBusIds)
+                    {
+                        await TrySendUsbConnectionEventAckAsync(lostBusId, "usb-disconnected", CancellationToken.None);
+                    }
+
+                    GuestLogger.Warn("usb.refresh.detected_local_detach", "USB im Guest nicht mehr attached; Host wurde per usb-disconnected informiert.", new
+                    {
+                        operationId,
+                        busIds = lostAttachedBusIds,
+                        count = lostAttachedBusIds.Count,
+                        hostAddress = hostResolution.ResolvedIpv4,
+                        hostSource = hostResolution.Source,
+                        transportPath = fallbackToIpUsed
+                            ? "ip-fallback"
+                            : (string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase) ? "hyperv" : "ip-fallback")
+                    });
+                }
             }
 
             var hasUsbListChanged = !UsbDeviceListsMatch(_usbDevices, list);
@@ -2507,7 +2543,7 @@ public sealed partial class App : Application
         }
     }
 
-    private async Task<int> ConnectUsbAsync(string busId)
+    private async Task<int> ConnectUsbAsync(string busId, bool skipCachedAttachedCheck = false)
     {
         var useHyperVSocket = _config?.Usb?.UseHyperVSocket != false;
         if (useHyperVSocket && _config?.Usb?.HostFeatureEnabled == false)
@@ -2541,7 +2577,7 @@ public sealed partial class App : Application
         ApplyUsbTransportResolution(hostResolution);
         var beforeDevice = FindUsbByBusId(busId);
 
-        if (IsGuestLocalAttachedDevice(beforeDevice))
+        if (!skipCachedAttachedCheck && IsGuestLocalAttachedDevice(beforeDevice))
         {
             _selectedUsbBusId = busId;
             await TrySendUsbConnectionEventAckAsync(busId, "usb-heartbeat", CancellationToken.None);
@@ -4241,7 +4277,7 @@ public sealed partial class App : Application
         var connectedCount = 0;
         foreach (var busId in candidates)
         {
-            var result = await ConnectUsbAsync(busId);
+            var result = await ConnectUsbAsync(busId, skipCachedAttachedCheck: true);
             if (result == 0)
             {
                 _usbAutoConnectBackoffUntilUtc.Remove(busId);

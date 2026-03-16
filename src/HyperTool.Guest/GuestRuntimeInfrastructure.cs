@@ -23,50 +23,57 @@ internal static class GuestLogger
 
     public static void Initialize(GuestLoggingSettings settings, bool debugEnabled = false)
     {
-        var configuredDirectory = (settings.DirectoryPath ?? string.Empty).Trim();
-        var directoryCandidates = new List<string>();
-
-        if (!string.IsNullOrWhiteSpace(configuredDirectory))
+        lock (Sync)
         {
-            directoryCandidates.Add(configuredDirectory);
-        }
+            _echoToConsole = settings.EchoToConsole;
+            _debugEnabled = debugEnabled;
 
-        directoryCandidates.Add(GuestConfigService.DefaultLogDirectory);
-        directoryCandidates.Add(Path.Combine(AppContext.BaseDirectory, "logs"));
-        directoryCandidates.Add(Path.Combine(Path.GetTempPath(), "HyperTool", "Guest", "logs"));
-
-        var directory = SessionLogFileService.ResolveWritableDirectory(directoryCandidates);
-
-        var fileName = string.IsNullOrWhiteSpace(settings.FileName)
-            ? "hypertool-guest.log"
-            : settings.FileName;
-
-        var effectiveFileName = debugEnabled
-            ? SessionLogFileService.AppendFileNameSuffix(fileName, "Debug")
-            : fileName;
-
-        SessionLogFileService.CleanupOldLogFiles(directory, LogRetentionPeriod);
-        _logFilePath = SessionLogFileService.CreateSessionLogFilePath(directory, effectiveFileName);
-        _echoToConsole = settings.EchoToConsole;
-        _debugEnabled = debugEnabled;
-
-        try
-        {
-            if (!File.Exists(_logFilePath))
+            if (string.IsNullOrWhiteSpace(_logFilePath))
             {
-                File.WriteAllText(_logFilePath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-            }
-        }
-        catch
-        {
-        }
+                var configuredDirectory = (settings.DirectoryPath ?? string.Empty).Trim();
+                var directoryCandidates = new List<string>();
 
-        try
-        {
-            Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
-        }
-        catch
-        {
+                if (!string.IsNullOrWhiteSpace(configuredDirectory))
+                {
+                    directoryCandidates.Add(configuredDirectory);
+                }
+
+                directoryCandidates.Add(GuestConfigService.DefaultLogDirectory);
+                directoryCandidates.Add(Path.Combine(AppContext.BaseDirectory, "logs"));
+                directoryCandidates.Add(Path.Combine(Path.GetTempPath(), "HyperTool", "Guest", "logs"));
+
+                var directory = SessionLogFileService.ResolveWritableDirectory(directoryCandidates);
+
+                var fileName = string.IsNullOrWhiteSpace(settings.FileName)
+                    ? "hypertool-guest.log"
+                    : settings.FileName;
+
+                var effectiveFileName = debugEnabled
+                    ? SessionLogFileService.AppendFileNameSuffix(fileName, "Debug")
+                    : fileName;
+
+                SessionLogFileService.CleanupOldLogFiles(directory, LogRetentionPeriod);
+                _logFilePath = SessionLogFileService.CreateSessionLogFilePath(directory, effectiveFileName);
+
+                try
+                {
+                    if (!File.Exists(_logFilePath))
+                    {
+                        File.WriteAllText(_logFilePath, string.Empty, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            try
+            {
+                Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            }
+            catch
+            {
+            }
         }
     }
 
