@@ -1961,7 +1961,8 @@ public partial class MainViewModel : ViewModelBase
             }
 
             var preparedDevices = devices
-                .OrderBy(device => device.BusId, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(GetUsbStatusSortRank)
+                .ThenBy(device => device.BusId, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(device => device.Description, StringComparer.OrdinalIgnoreCase)
                 .ToList();
             TryMigrateLegacyUsbIdentityKeys(preparedDevices);
@@ -1970,18 +1971,20 @@ public partial class MainViewModel : ViewModelBase
                 device.DeviceIdentityKey = BuildUsbDeviceIdentityKey(device);
                 ApplyUsbDeviceMetadata(device);
 
+                var hasFreshVmId = false;
                 if (device.IsAttached
                     && UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, _usbAutoDetachGracePeriod, out var sourceVmId))
                 {
+                    hasFreshVmId = true;
                     var vmNameById = ResolveVmNameByVmId(sourceVmId);
-                    if (!string.IsNullOrWhiteSpace(vmNameById))
-                    {
-                        device.AttachedGuestComputerName = vmNameById;
-                        continue;
-                    }
+                    device.AttachedGuestComputerName = !string.IsNullOrWhiteSpace(vmNameById)
+                        ? vmNameById
+                        : sourceVmId;
+                    continue;
                 }
 
                 if (device.IsAttached
+                    && !hasFreshVmId
                     && !string.IsNullOrWhiteSpace(device.BusId)
                     && UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device, _usbAutoDetachGracePeriod, out var guestComputerName))
                 {
@@ -2139,6 +2142,31 @@ public partial class MainViewModel : ViewModelBase
         return releasedCount;
     }
 
+    private static int GetUsbStatusSortRank(UsbIpDeviceInfo device)
+    {
+        if (device is null)
+        {
+            return 4;
+        }
+
+        if (device.IsAttached || device.IsAttachedByOtherGuest)
+        {
+            return 0;
+        }
+
+        if (device.IsShared)
+        {
+            return 1;
+        }
+
+        if (device.IsConnected)
+        {
+            return 2;
+        }
+
+        return 3;
+    }
+
     private static bool IsBenignUsbUnshareCleanupFailure(Exception ex)
     {
         if (ex is not InvalidOperationException)
@@ -2209,7 +2237,9 @@ public partial class MainViewModel : ViewModelBase
                 continue;
             }
 
-            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, effectiveGracePeriod, out _))
+            var hasFreshGuestVmId = UsbGuestConnectionRegistry.TryGetFreshGuestVmId(busId, effectiveGracePeriod, out _);
+            var hasFreshGuestComputerName = UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, effectiveGracePeriod, out _);
+            if (hasFreshGuestVmId || hasFreshGuestComputerName)
             {
                 _usbGuestManagedBusIds.Add(busId);
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
@@ -2264,7 +2294,9 @@ public partial class MainViewModel : ViewModelBase
             // Last chance before detach: wait briefly and re-check fresh guest ACK.
             await Task.Delay(StaleUsbAttachFinalRecheckDelay, token);
 
-            if (UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, effectiveGracePeriod, out _))
+            var hasFreshGuestVmIdAfterDelay = UsbGuestConnectionRegistry.TryGetFreshGuestVmId(busId, effectiveGracePeriod, out _);
+            var hasFreshGuestComputerNameAfterDelay = UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, effectiveGracePeriod, out _);
+            if (hasFreshGuestVmIdAfterDelay || hasFreshGuestComputerNameAfterDelay)
             {
                 _usbAttachedWithoutAckSinceUtc.Remove(busId);
                 _usbAttachedWithoutAckAttempts.Remove(busId);
@@ -2332,6 +2364,11 @@ public partial class MainViewModel : ViewModelBase
                 .Select(vm => (vm.Name ?? string.Empty).Trim())
                 .Where(static name => !string.IsNullOrWhiteSpace(name)),
             StringComparer.OrdinalIgnoreCase);
+        var runningVmIds = new HashSet<string>(
+            AvailableVms
+                .Where(vm => IsRunningState(vm.RuntimeState) && !string.IsNullOrWhiteSpace(vm.VmId))
+                .Select(vm => vm.VmId.Trim()),
+            StringComparer.OrdinalIgnoreCase);
 
         var targetBusIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var device in devices)
@@ -2345,6 +2382,15 @@ public partial class MainViewModel : ViewModelBase
 
             var busId = device.BusId.Trim();
             var attachedGuest = (device.AttachedGuestComputerName ?? string.Empty).Trim();
+            if (UsbGuestConnectionRegistry.TryGetFreshGuestVmId(device, _usbAutoDetachGracePeriod, out var sourceVmId))
+            {
+                if (!runningVmIds.Contains(sourceVmId))
+                {
+                    targetBusIds.Add(busId);
+                }
+
+                continue;
+            }
 
             if (!string.IsNullOrWhiteSpace(attachedGuest))
             {

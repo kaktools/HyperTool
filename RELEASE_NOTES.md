@@ -1,5 +1,33 @@
 # HyperTool Release Notes
 
+## v2.5.2
+
+### Highlights
+
+- USB-Transport in der Guest-App wurde gegen kurzzeitige Hyper-V-Socket-Abbrüche deutlich robuster gemacht, damit nicht unnötig auf IP-Fallback gewechselt wird.
+- Host und Guest nutzen jetzt konsistente Session-Logdateien mit Zeitstempel; bei aktiviertem Debug-Modus wird zusätzlich ein klarer Dateinamens-Suffix verwendet.
+- Log-Retention wurde gehärtet: Dateien älter als 3 Tage werden zuverlässiger entfernt, auch wenn sie schreibgeschützt sind.
+
+### Verbessert
+
+- Guest USB Transport-Stabilität:
+	- Transiente Hyper-V-Transportfehler werden breiter erkannt (u. a. Connection reset/aborted/timed out/refused).
+	- Vor einem Fallback auf IP werden mehrere gestaffelte Hyper-V-Retries ausgeführt.
+	- Das reduziert Flattern zwischen Hyper-V und IP-Fallback bei kurzen Verbindungsstörungen.
+- Logging Host/Guest:
+	- Pro App-Start wird eine neue Session-Datei mit Zeitstempel erstellt.
+	- Bei aktivem Debug-Logging wird der Dateiname mit `-Debug` gekennzeichnet.
+	- Dateinamen bleiben damit eindeutig und besser filterbar.
+
+### Behoben
+
+- Guest konnte trotz aktivem Hyper-V-Socket-Tunnel in einen unnötigen IP-Fallback-Zustand kippen, wenn kurzzeitig ein Remote-Reset auftrat.
+- Sehr alte Logdateien konnten in Einzelfällen liegen bleiben; die Bereinigung behandelt jetzt auch ReadOnly-Dateien robuster.
+
+### Doku
+
+- README auf `v2.5.2` aktualisiert (Release-Stand + Build-Beispiele).
+
 ## v2.5.0
 
 ### Highlights

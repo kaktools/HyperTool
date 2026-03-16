@@ -3843,14 +3843,7 @@ internal sealed class GuestMainWindow : Window
             ? "[Info] USB Transportmodus: Hyper-V Socket bevorzugt."
             : "[Info] USB Transportmodus: IP-Mode aktiv.");
 
-        if (_config.Usb.UseHyperVSocket)
-        {
-            ScheduleUsbTransportAutoRefresh();
-        }
-        else
-        {
-            CancelPendingUsbTransportAutoRefresh();
-        }
+        ScheduleUsbTransportAutoRefresh();
     }
 
     private void CancelPendingUsbTransportAutoRefresh()
@@ -3892,12 +3885,8 @@ internal sealed class GuestMainWindow : Window
                 return;
             }
 
-            if (_useHyperVSocketCheckBox.IsChecked != true || _config.Usb?.UseHyperVSocket != true)
-            {
-                return;
-            }
-
-            AppendNotification("[Info] Auto-Refresh nach Hyper-V Socket Aktivierung …");
+            var modeLabel = _config.Usb?.UseHyperVSocket == true ? "Hyper-V Socket" : "IP-Mode";
+            AppendNotification($"[Info] Auto-Refresh nach Transportwechsel ({modeLabel}) …");
             await RefreshUsbAsync();
         }
         catch (TaskCanceledException)
@@ -3905,7 +3894,7 @@ internal sealed class GuestMainWindow : Window
         }
         catch (Exception ex)
         {
-            AppendNotification($"[Warn] Auto-Refresh nach Hyper-V Socket Aktivierung fehlgeschlagen: {ex.Message}");
+            AppendNotification($"[Warn] Auto-Refresh nach Transportwechsel fehlgeschlagen: {ex.Message}");
         }
         finally
         {

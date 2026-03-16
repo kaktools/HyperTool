@@ -6,6 +6,39 @@ namespace HyperTool.Services;
 
 public static class SessionLogFileService
 {
+    public static string AppendFileNameSuffix(string fileName, string suffix)
+    {
+        var normalizedFileName = string.IsNullOrWhiteSpace(fileName)
+            ? "hypertool.log"
+            : fileName.Trim();
+
+        var extension = Path.GetExtension(normalizedFileName);
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            extension = ".log";
+        }
+
+        var fileStem = Path.GetFileNameWithoutExtension(normalizedFileName);
+        if (string.IsNullOrWhiteSpace(fileStem))
+        {
+            fileStem = "hypertool";
+        }
+
+        var normalizedSuffix = (suffix ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSuffix))
+        {
+            return fileStem + extension;
+        }
+
+        var expectedSuffix = "-" + normalizedSuffix;
+        if (fileStem.EndsWith(expectedSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return fileStem + extension;
+        }
+
+        return fileStem + expectedSuffix + extension;
+    }
+
     public static string ResolveWritableDirectory(IEnumerable<string> directoryCandidates)
     {
         foreach (var candidate in directoryCandidates)
@@ -69,6 +102,12 @@ public static class SessionLogFileService
                 {
                     if (File.GetLastWriteTimeUtc(filePath) < cutoffUtc)
                     {
+                        var attributes = File.GetAttributes(filePath);
+                        if ((attributes & FileAttributes.ReadOnly) != 0)
+                        {
+                            File.SetAttributes(filePath, attributes & ~FileAttributes.ReadOnly);
+                        }
+
                         File.Delete(filePath);
                     }
                 }
@@ -121,7 +160,11 @@ public static class HostLoggingService
         var logsDirectory = SessionLogFileService.ResolveWritableDirectory(logDirectoryCandidates);
         SessionLogFileService.CleanupOldLogFiles(logsDirectory, LogRetentionPeriod);
 
-        var logFilePath = SessionLogFileService.CreateSessionLogFilePath(logsDirectory, "hypertool.log");
+        var baseLogFileName = debugLoggingEnabled
+            ? SessionLogFileService.AppendFileNameSuffix("hypertool.log", "Debug")
+            : "hypertool.log";
+
+        var logFilePath = SessionLogFileService.CreateSessionLogFilePath(logsDirectory, baseLogFileName);
         var logger = new LoggerConfiguration()
             .MinimumLevel.Is(debugLoggingEnabled ? LogEventLevel.Debug : LogEventLevel.Information)
             .WriteTo.File(

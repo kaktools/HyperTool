@@ -41,6 +41,11 @@ public sealed class UsbIpDeviceInfo
     {
         get
         {
+            if (IsAttachedByOtherGuest)
+            {
+                return "Busy";
+            }
+
             if (!IsConnected && IsShared)
             {
                 return "Persisted";
@@ -48,11 +53,6 @@ public sealed class UsbIpDeviceInfo
 
             if (IsAttached)
             {
-                if (IsAttachedByOtherGuest)
-                {
-                    return "Busy";
-                }
-
                 return "Attached";
             }
 
@@ -136,9 +136,20 @@ public sealed class UsbIpDeviceInfo
     {
         get
         {
-            if (IsAttached && !string.IsNullOrWhiteSpace(AttachedGuestComputerName))
+            if ((IsAttached || IsAttachedByOtherGuest)
+                && !string.IsNullOrWhiteSpace(AttachedGuestComputerName))
             {
                 return AttachedGuestComputerName;
+            }
+
+            var normalizedClientIp = (ClientIpAddress ?? string.Empty).Trim();
+            if ((IsAttached || IsAttachedByOtherGuest)
+                && !string.IsNullOrWhiteSpace(normalizedClientIp)
+                && !string.Equals(normalizedClientIp, "127.0.0.1", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(normalizedClientIp, "::1", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(normalizedClientIp, "localhost", StringComparison.OrdinalIgnoreCase))
+            {
+                return normalizedClientIp;
             }
 
             return "-";

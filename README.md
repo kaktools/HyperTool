@@ -4,13 +4,12 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.5.0**
-- USB Multi-VM Status ist konsistenter: Guest zeigt Geräte bei Attach in anderen VMs jetzt als `Busy` statt fälschlich als verfügbar.
-- Host->Guest Identity-Payload wurde um USB-Attachment-Daten erweitert, damit Guest-Status und Auto-Connect-Entscheidungen VM-übergreifend korrekt bleiben.
-- Snapshot-Ansicht wurde stabilisiert: Name/Beschreibung/Datum wieder sichtbar, `Aktuell`-Markierung klarer, und Beschreibungen aus Create-Dialog werden zuverlässiger übernommen.
-- Host USB-Liste aktualisiert in-place mit stabilerer Reihenfolge, dadurch weniger visuelles Flackern bei Refresh/Status-Updates.
-- Guest Bottom-Notifications sind kompakter (ohne `(event=...) | {json}`), während Detail-Logs in der Logdatei erhalten bleiben.
-- First-Start USB-Migrationshinweis ist jetzt sauber auf Update-Fälle begrenzt: alte USB-Einträge werden einmalig entfernt und müssen neu gesetzt werden.
+- Version: **v2.5.2**
+- USB-Transport im Guest ist robuster gegen kurzzeitige Hyper-V-Socket-Abbrüche und wechselt nicht mehr so aggressiv auf IP-Fallback.
+- Hyper-V-Fehlerbehandlung für USB-Refresh wurde erweitert (mehr transiente Fehlerbilder + gestaffelte Retries vor Fallback).
+- Logging in Host und Guest ist konsistent als Session-Log mit Zeitstempel je App-Start umgesetzt.
+- Bei aktiviertem Debug-Logging wird die Logdatei eindeutig mit `-Debug` gekennzeichnet.
+- Logbereinigung ist robuster: Dateien älter als 3 Tage werden zuverlässiger entfernt (inklusive schreibgeschützter Dateien).
 
 ## Projekte
 
@@ -87,60 +86,7 @@ Wenn dir HyperTool hilft und du das Projekt unterstützen möchtest:
 - Für Entwicklung: .NET SDK 8.x
 - Für Installer-Build: Inno Setup 6 (ISCC)
 
-Legacy-Hinweis für Guestx86:
 
-- `HyperTool.Guestx86` ist als WPF/.NET Framework 4.8 Variante für x86 ausgelegt.
-- Ziel ist Kompatibilität mit älteren Windows-Versionen (inkl. Win7), abhängig von den installierten Drittanbieter-Runtimes.
-
-## Repository-Struktur
-
-- HyperTool.sln
-- src/HyperTool.Core
-- src/HyperTool.WinUI
-- src/HyperTool.Guest
-- src/HyperTool.Guestx86
-- installer/HyperTool.iss
-- installer/HyperTool.Guest.iss
-- build-host.bat
-- build-installer-host.bat
-- build-guest.bat
-- build-guestx86.bat
-- build_guestx86.bat
-- build_installer_guestx86.bat
-- build-installer-guest.bat
-- build-all.bat
-
-## Build
-
-### Host
-
-- build-host.bat
-- build-installer-host.bat version=2.5.0
-
-### Guest
-
-- build-guest.bat
-- build-installer-guest.bat version=2.5.0
-
-### Guestx86 (Legacy WPF)
-
-- build-guestx86.bat
-- build_guestx86.bat
-- build_installer_guestx86.bat version=2.5.0
-
-### Komplett
-
-- build-all.bat
-- build-all.bat version=2.5.0 host guest host-installer guest-installer no-pause
-
-Ausgaben:
-
-- dist/HyperTool.WinUI
-- dist/HyperTool.Guest
-- dist/HyperTool.Guestx86
-- dist/installer-winui
-- dist/installer-guest
-- dist/installer-guestx86
 
 ## Konfiguration
 

@@ -2126,7 +2126,9 @@ public sealed partial class App : Application
             return _usbDevices;
         }
 
-        if (_config?.Usb?.HostFeatureEnabled == false)
+        var useHyperVSocket = _config?.Usb?.UseHyperVSocket != false;
+
+        if (useHyperVSocket && _config?.Usb?.HostFeatureEnabled == false)
         {
             if (_usbDevices.Count > 0)
             {
@@ -2190,7 +2192,8 @@ public sealed partial class App : Application
             var fallbackToIpUsed = false;
             string? fallbackHostAddress = null;
 
-            if (useRemoteHostList
+            if (useHyperVSocket
+                && useRemoteHostList
                 && (DateTimeOffset.UtcNow - _lastHostIdentityBackgroundAttemptUtc) >= TimeSpan.FromSeconds(GuestHostIdentityUsbRefreshSeconds))
             {
                 _lastHostIdentityBackgroundAttemptUtc = DateTimeOffset.UtcNow;
@@ -2219,15 +2222,24 @@ public sealed partial class App : Application
 
                     if (IsTransientHyperVTransportFailure(hyperVEx))
                     {
-                        await Task.Delay(220);
-                        try
+                        var retryDelaysMs = new[] { 220, 480, 900 };
+                        foreach (var retryDelayMs in retryDelaysMs)
                         {
-                            list = await _usbService.GetRemoteDevicesAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
-                            recoveredByRetry = true;
-                        }
-                        catch (Exception retryEx)
-                        {
-                            hyperVEx = retryEx;
+                            await Task.Delay(retryDelayMs);
+                            try
+                            {
+                                list = await _usbService.GetRemoteDevicesAsync(hostResolution.ResolvedIpv4, CancellationToken.None);
+                                recoveredByRetry = true;
+                                break;
+                            }
+                            catch (Exception retryEx)
+                            {
+                                hyperVEx = retryEx;
+                                if (!IsTransientHyperVTransportFailure(hyperVEx))
+                                {
+                                    break;
+                                }
+                            }
                         }
                     }
 
@@ -2452,7 +2464,7 @@ public sealed partial class App : Application
 
         var danglingAttachedBusIds = _usbDevices
             .Where(device =>
-                device.IsAttached
+                IsGuestLocalAttachedDevice(device)
                 && !string.IsNullOrWhiteSpace(device.BusId)
                 && !remoteBusIds.Contains(device.BusId.Trim()))
             .Select(device => device.BusId.Trim())
@@ -2492,7 +2504,8 @@ public sealed partial class App : Application
 
     private async Task<int> ConnectUsbAsync(string busId)
     {
-        if (_config?.Usb?.HostFeatureEnabled == false)
+        var useHyperVSocket = _config?.Usb?.UseHyperVSocket != false;
+        if (useHyperVSocket && _config?.Usb?.HostFeatureEnabled == false)
         {
             GuestLogger.Warn("usb.connect.blocked_host_policy", "USB Connect blockiert: Host hat USB Share deaktiviert.", new
             {
@@ -2523,8 +2536,7 @@ public sealed partial class App : Application
         ApplyUsbTransportResolution(hostResolution);
         var beforeDevice = FindUsbByBusId(busId);
 
-        if (beforeDevice?.IsAttached == true
-            && string.Equals(beforeDevice.ClientIpAddress?.Trim(), HyperVSocketUsbTunnelDefaults.LoopbackAddress, StringComparison.OrdinalIgnoreCase))
+        if (IsGuestLocalAttachedDevice(beforeDevice))
         {
             _selectedUsbBusId = busId;
             await TrySendUsbConnectionEventAckAsync(busId, "usb-heartbeat", CancellationToken.None);
@@ -2604,7 +2616,7 @@ public sealed partial class App : Application
                 }
 
                 var currentDevice = FindUsbByBusId(busId);
-                if (currentDevice?.IsAttached == true)
+                if (IsGuestLocalAttachedDevice(currentDevice))
                 {
                     await TrySendUsbConnectionEventAckAsync(busId, "usb-heartbeat", CancellationToken.None);
 
@@ -2821,7 +2833,15 @@ public sealed partial class App : Application
                || message.Contains("Warteschlange voll", StringComparison.OrdinalIgnoreCase)
                || message.Contains("No buffer space", StringComparison.OrdinalIgnoreCase)
                || message.Contains("queue full", StringComparison.OrdinalIgnoreCase)
-               || message.Contains("temporarily unavailable", StringComparison.OrdinalIgnoreCase);
+               || message.Contains("temporarily unavailable", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("existing connection was forcibly closed", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("Eine vorhandene Verbindung wurde vom Remotehost geschlossen", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("connection reset", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("connection aborted", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("connection timed out", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("Verbindungsversuch", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("actively refused", StringComparison.OrdinalIgnoreCase)
+               || message.Contains("forcibly closed", StringComparison.OrdinalIgnoreCase);
     }
 
     private void MarkUsbClientUnavailableAndRefreshUi(string eventName, string? busId, string reason)
@@ -2954,7 +2974,8 @@ public sealed partial class App : Application
 
     private async Task<int> DisconnectUsbAsync(string busId, bool bypassHostFeaturePolicy)
     {
-        if (!bypassHostFeaturePolicy && _config?.Usb?.HostFeatureEnabled == false)
+        var useHyperVSocket = _config?.Usb?.UseHyperVSocket != false;
+        if (!bypassHostFeaturePolicy && useHyperVSocket && _config?.Usb?.HostFeatureEnabled == false)
         {
             GuestLogger.Warn("usb.disconnect.blocked_host_policy", "USB Disconnect blockiert: Host hat USB Share deaktiviert.", new
             {
@@ -3082,7 +3103,10 @@ public sealed partial class App : Application
 
     private UsbHostResolution ResolveUsbHostAddressDiagnostics(bool preferHyperVSocket = true)
     {
+        var useHyperVSocket = _config?.Usb?.UseHyperVSocket != false;
+
         if (preferHyperVSocket
+            && useHyperVSocket
             && _usbHyperVSocketProxy?.IsRunning == true)
         {
             return new UsbHostResolution(
@@ -3299,7 +3323,7 @@ public sealed partial class App : Application
         }
 
         var attachedBusIds = _usbDevices
-            .Where(device => device.IsAttached && !string.IsNullOrWhiteSpace(device.BusId))
+            .Where(device => IsGuestLocalAttachedDevice(device) && !string.IsNullOrWhiteSpace(device.BusId))
             .Select(device => device.BusId.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -3362,7 +3386,7 @@ public sealed partial class App : Application
         }
 
         var attachedBusIds = _usbDevices
-            .Where(device => device.IsAttached && !string.IsNullOrWhiteSpace(device.BusId))
+            .Where(device => IsGuestLocalAttachedDevice(device) && !string.IsNullOrWhiteSpace(device.BusId))
             .Select(device => device.BusId.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -3530,8 +3554,9 @@ public sealed partial class App : Application
                 if (!_isExitRequested && _config?.Usb?.Enabled != false)
                 {
                     var wasHostUsbEnabled = _config?.Usb?.HostFeatureEnabled != false;
-                    var shouldRefreshHostIdentity = !hasAttachedDevice
-                        || (DateTimeOffset.UtcNow - _lastHostIdentityBackgroundAttemptUtc) >= TimeSpan.FromSeconds(GuestHostIdentityBackgroundRefreshSeconds);
+                    var shouldRefreshHostIdentity = (_config?.Usb?.UseHyperVSocket == true)
+                        && (!hasAttachedDevice
+                            || (DateTimeOffset.UtcNow - _lastHostIdentityBackgroundAttemptUtc) >= TimeSpan.FromSeconds(GuestHostIdentityBackgroundRefreshSeconds));
 
                     if (shouldRefreshHostIdentity)
                     {
@@ -3609,7 +3634,18 @@ public sealed partial class App : Application
 
     private bool HasAttachedUsbDevice()
     {
-        return _usbDevices.Any(device => device.IsAttached && !string.IsNullOrWhiteSpace(device.BusId));
+        return _usbDevices.Any(device => IsGuestLocalAttachedDevice(device) && !string.IsNullOrWhiteSpace(device.BusId));
+    }
+
+    private static bool IsGuestLocalAttachedDevice(UsbIpDeviceInfo? device)
+    {
+        if (device is null || !device.IsAttached || device.IsAttachedByOtherGuest)
+        {
+            return false;
+        }
+
+        var clientIp = (device.ClientIpAddress ?? string.Empty).Trim();
+        return !string.IsNullOrWhiteSpace(clientIp);
     }
 
     private void StartSharedFolderAutoMountLoop()
@@ -3900,7 +3936,12 @@ public sealed partial class App : Application
             changed = true;
         }
 
-        if (!string.IsNullOrWhiteSpace(normalizedHostName)
+        var useHyperVSocket = _config.Usb.UseHyperVSocket;
+
+        // In IP mode, keep the manually configured host target stable.
+        // Host-identity refresh should not rewrite usb.hostAddress from IP to hostname.
+        if (useHyperVSocket
+            && !string.IsNullOrWhiteSpace(normalizedHostName)
             && !string.Equals(_config.Usb.HostAddress, normalizedHostName, StringComparison.OrdinalIgnoreCase))
         {
             _config.Usb.HostAddress = normalizedHostName;
@@ -4404,14 +4445,11 @@ public sealed partial class App : Application
             return;
         }
 
-        var existingAttachedGuest = (device.AttachedGuestComputerName ?? string.Empty).Trim();
-        var isLikelyLocalAttachment = device.IsAttached
-            && (string.IsNullOrWhiteSpace(existingAttachedGuest)
-                || string.Equals(existingAttachedGuest, Environment.MachineName, StringComparison.OrdinalIgnoreCase));
+        var hasLocalPortAttachment = !string.IsNullOrWhiteSpace((device.ClientIpAddress ?? string.Empty).Trim());
 
         if (!_hostUsbAttachmentsByBusId.TryGetValue(busId, out var attachment))
         {
-            if (!isLikelyLocalAttachment)
+            if (!hasLocalPortAttachment)
             {
                 device.AttachedGuestComputerName = string.Empty;
                 device.ClientIpAddress = string.Empty;
@@ -4423,28 +4461,17 @@ public sealed partial class App : Application
         var attachedGuest = !string.IsNullOrWhiteSpace(attachment.GuestVmName)
             ? attachment.GuestVmName.Trim()
             : (attachment.GuestComputerName ?? string.Empty).Trim();
-        var attachedClientIp = (attachment.ClientIpAddress ?? string.Empty).Trim();
 
-        device.IsAttachedByOtherGuest = !isLikelyLocalAttachment
-            && !string.IsNullOrWhiteSpace(attachedGuest);
-
-        if (string.IsNullOrWhiteSpace(device.AttachedGuestComputerName)
-            || !isLikelyLocalAttachment)
+        if (hasLocalPortAttachment)
         {
-            device.AttachedGuestComputerName = attachedGuest;
+            // Preserve local attachment state from usbip client output.
+            return;
         }
 
-        if (string.IsNullOrWhiteSpace(device.ClientIpAddress))
-        {
-            // Mark as attached on another guest even when no local usbip port mapping exists.
-            device.ClientIpAddress = !string.IsNullOrWhiteSpace(attachedClientIp)
-                ? attachedClientIp
-                : "remote-attached";
-        }
-        else if (!isLikelyLocalAttachment && !string.IsNullOrWhiteSpace(attachedClientIp))
-        {
-            device.ClientIpAddress = attachedClientIp;
-        }
+        device.IsAttachedByOtherGuest = !string.IsNullOrWhiteSpace(attachedGuest);
+        device.AttachedGuestComputerName = device.IsAttachedByOtherGuest ? attachedGuest : string.Empty;
+        // Keep ClientIpAddress empty for remote ownership hints so local attach logic stays deterministic.
+        device.ClientIpAddress = string.Empty;
     }
 
     private void StartUsbDiagnosticsLoop()
@@ -4568,7 +4595,7 @@ public sealed partial class App : Application
         }
 
         var attachedBusIds = _usbDevices
-            .Where(device => device.IsAttached && !string.IsNullOrWhiteSpace(device.BusId))
+            .Where(device => IsGuestLocalAttachedDevice(device) && !string.IsNullOrWhiteSpace(device.BusId))
             .Select(device => device.BusId.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -4981,7 +5008,7 @@ public sealed partial class App : Application
 
         var now = DateTimeOffset.UtcNow;
         var attachedBusIds = _usbDevices
-            .Where(device => device.IsAttached && !string.IsNullOrWhiteSpace(device.BusId))
+            .Where(device => IsGuestLocalAttachedDevice(device) && !string.IsNullOrWhiteSpace(device.BusId))
             .Select(device => device.BusId.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();

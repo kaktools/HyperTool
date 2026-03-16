@@ -36,15 +36,43 @@ public static class UsbGuestConnectionRegistry
 
         if (string.Equals(eventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
         {
+            var skipDeviceKeyRemoval = false;
+            var skipBusIdRemoval = false;
+
+            if (!string.IsNullOrWhiteSpace(sourceVmId))
+            {
+                if (!string.IsNullOrWhiteSpace(deviceKey)
+                    && ConnectedGuestsByDeviceKey.TryGetValue(deviceKey, out var existingByDeviceKey)
+                    && !string.IsNullOrWhiteSpace(existingByDeviceKey.SourceVmId)
+                    && !string.Equals(existingByDeviceKey.SourceVmId, sourceVmId, StringComparison.OrdinalIgnoreCase))
+                {
+                    skipDeviceKeyRemoval = true;
+                }
+
+                if (!string.IsNullOrWhiteSpace(busId)
+                    && ConnectedGuestsByBusId.TryGetValue(busId, out var existingByBusId)
+                    && !string.IsNullOrWhiteSpace(existingByBusId.SourceVmId)
+                    && !string.Equals(existingByBusId.SourceVmId, sourceVmId, StringComparison.OrdinalIgnoreCase))
+                {
+                    skipBusIdRemoval = true;
+                }
+            }
+
             if (!string.IsNullOrWhiteSpace(deviceKey))
             {
-                ConnectedGuestsByDeviceKey.TryRemove(deviceKey, out _);
+                if (!skipDeviceKeyRemoval)
+                {
+                    ConnectedGuestsByDeviceKey.TryRemove(deviceKey, out _);
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(busId))
             {
-                ConnectedGuestsByBusId.TryRemove(busId, out _);
-                DeviceKeyByBusId.TryRemove(busId, out _);
+                if (!skipBusIdRemoval)
+                {
+                    ConnectedGuestsByBusId.TryRemove(busId, out _);
+                    DeviceKeyByBusId.TryRemove(busId, out _);
+                }
             }
 
             return;
@@ -55,10 +83,21 @@ public static class UsbGuestConnectionRegistry
             && !string.IsNullOrWhiteSpace(deviceKey)
             && (!string.IsNullOrWhiteSpace(guestComputerName) || !string.IsNullOrWhiteSpace(sourceVmId)))
         {
+            GuestConnectionEntry? existingEntry = null;
+            if (!ConnectedGuestsByDeviceKey.TryGetValue(deviceKey, out existingEntry)
+                && !string.IsNullOrWhiteSpace(busId))
+            {
+                ConnectedGuestsByBusId.TryGetValue(busId, out existingEntry);
+            }
+
             var entry = new GuestConnectionEntry
             {
-                GuestComputerName = guestComputerName,
-                SourceVmId = sourceVmId,
+                GuestComputerName = !string.IsNullOrWhiteSpace(guestComputerName)
+                    ? guestComputerName
+                    : (existingEntry?.GuestComputerName ?? string.Empty),
+                SourceVmId = !string.IsNullOrWhiteSpace(sourceVmId)
+                    ? sourceVmId
+                    : (existingEntry?.SourceVmId ?? string.Empty),
                 LastSeenUtc = DateTimeOffset.UtcNow
             };
 

@@ -41,8 +41,12 @@ internal static class GuestLogger
             ? "hypertool-guest.log"
             : settings.FileName;
 
+        var effectiveFileName = debugEnabled
+            ? SessionLogFileService.AppendFileNameSuffix(fileName, "Debug")
+            : fileName;
+
         SessionLogFileService.CleanupOldLogFiles(directory, LogRetentionPeriod);
-        _logFilePath = Path.Combine(directory, fileName);
+        _logFilePath = SessionLogFileService.CreateSessionLogFilePath(directory, effectiveFileName);
         _echoToConsole = settings.EchoToConsole;
         _debugEnabled = debugEnabled;
 
