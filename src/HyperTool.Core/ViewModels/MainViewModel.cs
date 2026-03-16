@@ -30,6 +30,8 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan UsbMetadataBusAliasTtl = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan VmAutoDetachDelayAfterVmStop = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan UsbStaleExportHintEscalationWindow = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan UsbDisconnectRecoveryProbeInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan UsbDisconnectRecoveryFreshnessWindow = TimeSpan.FromSeconds(15);
     private const int UsbStaleExportHintEscalationCount = 2;
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
     private const int LoopbackManagedUsbDetachRetryFloor = 20;
@@ -4953,9 +4955,25 @@ public partial class MainViewModel : ViewModelBase
             await _usbTrayRefreshGate.WaitAsync(_lifetimeCancellation.Token);
             gateEntered = true;
 
+            if (_usbAutoDetachGracePeriod > TimeSpan.Zero)
+            {
+                var recoveredDuringGrace = await WaitForUsbDisconnectRecoveryAsync(
+                    normalizedBusId,
+                    _usbAutoDetachGracePeriod,
+                    _lifetimeCancellation.Token);
+
+                if (recoveredDuringGrace)
+                {
+                    Log.Information(
+                        "USB auto-detach skipped after guest disconnect because fresh reconnect activity was detected during grace period. BusId={BusId}",
+                        normalizedBusId);
+                    return;
+                }
+            }
+
             var detached = await TryDetachBusWithRetryAsync(
                 normalizedBusId,
-                initialDelay: _usbAutoDetachGracePeriod,
+                initialDelay: TimeSpan.Zero,
                 _lifetimeCancellation.Token,
                 context: "guest-disconnected");
 
@@ -4998,6 +5016,44 @@ public partial class MainViewModel : ViewModelBase
     public async Task HandleUsbStaleExportHintAsync(string busId, string? sourceVmId = null, string? guestComputerName = null)
     {
         await Task.CompletedTask;
+    }
+
+    private async Task<bool> WaitForUsbDisconnectRecoveryAsync(string busId, TimeSpan gracePeriod, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(busId))
+        {
+            return false;
+        }
+
+        var remaining = gracePeriod;
+        while (remaining > TimeSpan.Zero)
+        {
+            var delay = remaining <= UsbDisconnectRecoveryProbeInterval
+                ? remaining
+                : UsbDisconnectRecoveryProbeInterval;
+
+            await Task.Delay(delay, token);
+
+            if (HasFreshUsbGuestActivity(busId))
+            {
+                return true;
+            }
+
+            remaining -= delay;
+        }
+
+        return HasFreshUsbGuestActivity(busId);
+    }
+
+    private static bool HasFreshUsbGuestActivity(string busId)
+    {
+        if (string.IsNullOrWhiteSpace(busId))
+        {
+            return false;
+        }
+
+        return UsbGuestConnectionRegistry.TryGetFreshGuestVmId(busId, UsbDisconnectRecoveryFreshnessWindow, out _)
+               || UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(busId, UsbDisconnectRecoveryFreshnessWindow, out _);
     }
 
     private static bool IsUsbDetachNoOpError(Exception ex)

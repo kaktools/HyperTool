@@ -17,6 +17,7 @@
 - Host USB Detach-Policy:
 	- Zyklische Guest-ACK-/Liveness-basierte Auto-Detach-Heuristiken wurden entfernt.
 	- Auto-Detach ist auf explizite Trigger beschränkt (`usb-disconnected` oder VM-ID nicht Running >= 10s).
+	- Bei `usb-disconnected` wartet der Host jetzt nicht nur die Grace-Phase ab, sondern prüft währenddessen aktiv auf frische Reconnect-/Heartbeat-Aktivität und überspringt den Detach, wenn sich der Guest stabil zurückmeldet.
 	- Bei fehlgeschlagenem Auto-Detach bleibt der manuelle Weg (`Detach`/`Unshare`) als kontrollierter Fallback erhalten.
 	- Für diese Trigger nutzt der Host wieder konfigurierbare Retry/Grace/Delay-Werte (`usb.autoDetachRetryAttempts`, `usb.autoDetachGracePeriodSeconds`, `usb.autoDetachRetryDelayMs`).
 - Host USB UX:
@@ -30,6 +31,7 @@
 
 - Snapshot-Beschreibungen gingen nach Reload/Neustart verloren, obwohl der Snapshot selbst vorhanden war.
 - USB-Stale-Recovery reagierte in Grenzfällen zu aggressiv durch zyklische Liveness-Logik; die Detach-Entscheidung folgt jetzt nur noch den klar definierten Triggern.
+- Verzögerte Host-Detachs nach kurzzeitigen USB-Transportabbrüchen konnten trotz schneller Guest-Recovery weiterlaufen; Reconnect-/Heartbeat-Recovery während der Grace-Phase bricht den Auto-Detach jetzt sauber ab.
 - UAC-Anforderung für Host-Detach entfällt; Detach wird ohne zusätzliche Elevation ausgeführt.
 
 ### Doku
