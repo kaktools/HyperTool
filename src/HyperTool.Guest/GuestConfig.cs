@@ -74,6 +74,8 @@ internal sealed class GuestUsbSettings
     public bool UsbConfigResetMigrationApplied { get; set; }
 
     public bool UsbConfigResetMigrationInfoPending { get; set; }
+
+    public bool HyperVOnlyCleanupMigrationApplied { get; set; }
 }
 
 internal sealed class GuestSharedFolderSettings
@@ -282,6 +284,7 @@ internal static class GuestConfigService
             config.Usb ??= new GuestUsbSettings();
             config.Usb.UsbConfigResetMigrationApplied = true;
             config.Usb.UsbConfigResetMigrationInfoPending = false;
+            config.Usb.HyperVOnlyCleanupMigrationApplied = true;
             Write(configPath, config);
             created = true;
             return config;
@@ -290,8 +293,10 @@ internal static class GuestConfigService
         var raw = File.ReadAllText(configPath);
         var loaded = JsonSerializer.Deserialize<GuestConfig>(raw, SerializerOptions) ?? new GuestConfig();
         var resetMigrationWasApplied = loaded.Usb?.UsbConfigResetMigrationApplied == true;
+        var hyperVOnlyCleanupWasApplied = loaded.Usb?.HyperVOnlyCleanupMigrationApplied == true;
         Normalize(loaded);
-        if (!resetMigrationWasApplied && loaded.Usb?.UsbConfigResetMigrationApplied == true)
+        if ((!resetMigrationWasApplied && loaded.Usb?.UsbConfigResetMigrationApplied == true)
+            || (!hyperVOnlyCleanupWasApplied && loaded.Usb?.HyperVOnlyCleanupMigrationApplied == true))
         {
             Write(configPath, loaded);
         }
@@ -354,6 +359,13 @@ internal static class GuestConfigService
         config.Usb.HyperVSocketServiceId = string.IsNullOrWhiteSpace(config.Usb.HyperVSocketServiceId)
             ? HyperTool.Services.HyperVSocketUsbTunnelDefaults.ServiceIdString
             : config.Usb.HyperVSocketServiceId.Trim();
+
+        if (!config.Usb.HyperVOnlyCleanupMigrationApplied)
+        {
+            // One-time cleanup for update installations after removing legacy IP/fallback mode.
+            config.Usb.HostAddress = string.Empty;
+            config.Usb.HyperVOnlyCleanupMigrationApplied = true;
+        }
 
         if (!config.Usb.UsbConfigResetMigrationApplied)
         {

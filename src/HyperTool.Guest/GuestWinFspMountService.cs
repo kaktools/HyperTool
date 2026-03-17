@@ -1018,7 +1018,7 @@ internal sealed class HyperToolRpcFileSystem : FileSystemBase
         {
             Operation = "delete",
             RelativePath = node.RelativePath,
-            Recursive = false
+            Recursive = node.IsDirectory
         });
 
         if (!response.Success)
