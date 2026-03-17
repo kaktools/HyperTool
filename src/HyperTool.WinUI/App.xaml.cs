@@ -2327,6 +2327,16 @@ public sealed partial class App : Application
                 ack.SentAtUtc,
                 _usbHostTunnel?.IsRunning == true,
                 HyperVSocketUsbHostTunnel.IsServiceRegistered());
+
+            if (ack.HyperVSocketActive == true && ack.RegistryServiceOk == true)
+            {
+                Log.Information(
+                    "Hyper-V socket stability confirmed by guest diagnostics. EventType={EventType}; GuestComputerName={GuestComputerName}; BusId={BusId}; HardwareId={HardwareId}",
+                    ack.EventType,
+                    ack.GuestComputerName,
+                    ack.BusId,
+                    ack.HardwareId);
+            }
         }
     }
 

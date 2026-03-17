@@ -74,7 +74,7 @@ public sealed class HelpWindow : Window
         bodyStack.Children.Add(CreateSection("USB Host", "USB Share zeigt oben rechts einen Aktiv/Inaktiv-Status-Chip. Bei deaktiviertem Feature erscheint im Tabellenbereich ein zentrierter Hinweis 'Deaktiviert'; nach Reaktivierung wird nach ca. 1 Sekunde automatisch aktualisiert."));
         bodyStack.Children.Add(CreateSection("Shared Folder Host", "Shared Folder nutzt ebenfalls einen Aktiv/Inaktiv-Status-Chip oben rechts. Bei deaktiviertem Feature wird der Katalog mit dem Overlay 'Deaktiviert' markiert; nach Aktivierung erfolgt eine automatische Aktualisierung."));
         bodyStack.Children.Add(CreateSection("Tray Klickverhalten", "Linksklick und Rechtsklick auf das Tasktray-Icon öffnen das Control Center."));
-        bodyStack.Children.Add(CreateSection("Config / Info", "Konfiguration speichern, neu laden und die App über 'Tool neu starten' mit kurzem Reload-Screen neu laden. Zusätzlich: Update-Status und Diagnose-/Versionsinfos."));
+        bodyStack.Children.Add(CreateSection("Config / Info", "Konfiguration speichern, neu laden und die App über 'Tool neu starten' mit kurzem Reload-Screen neu laden. Zusätzlich: Update-Status und Diagnose-/Versionsinfos. Erfolgreiche Guest-Diagnosen werden im Host-Log als stabile Hyper-V-Socket-Bestätigung markiert."));
         bodyStack.Children.Add(CreateSection("Logs", "'Logs öffnen' öffnet immer den Log-Ordner (nicht einzelne Dateien)."));
         bodyStack.Children.Add(CreateHiddenRainbowPrincessTrigger());
         bodyCard.Child = new ScrollViewer

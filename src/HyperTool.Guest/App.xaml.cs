@@ -27,14 +27,20 @@ public sealed partial class App : Application
     private const int GuestUsbAutoRefreshNoAutoConnectSeconds = 10;
     private const int GuestUsbAttachedBackgroundRefreshSeconds = 30;
     private const int GuestHostIdentityBackgroundRefreshSeconds = 30;
-    private const int GuestHostIdentityUsbRefreshSeconds = 8;
-    private static readonly TimeSpan HostIdentityRefreshAfterUsbRefreshInterval = TimeSpan.FromSeconds(20);
+    private const int GuestHostIdentityUsbRefreshSeconds = 20;
+    private static readonly TimeSpan HostIdentityRefreshAfterUsbRefreshInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan HyperVSocketMonitorHeartbeatInterval = TimeSpan.FromMinutes(1);
     private const int GuestUsbAutoConnectFailureBackoffSeconds = 20;
     private const int UsbServiceOperationTimeoutSeconds = 12;
     private const int GuestUsbHeartbeatIntervalSeconds = 45;
     private const int GuestStaleExportDisconnectSignalThreshold = 3;
     private const int GuestStaleExportDisconnectSignalMinAgeSeconds = 30;
+    private const int GuestLocalDetachSignalThreshold = 3;
+    private const int GuestLocalDetachSignalMinAgeSeconds = 25;
+    private const int GuestAutoDisconnectSuppressionSecondsAfterAttach = 180;
+    private const int GuestLocalDetachHintSuppressionSeconds = 15;
+    private const int GuestLocalDetachConfirmationAttempts = 2;
+    private const int GuestLocalDetachConfirmationDelayMs = 700;
     private const int HyperVProbeGraceAfterDataPathSuccessSeconds = 180;
     private static readonly TimeSpan UsbRefreshSuccessLogHeartbeatInterval = TimeSpan.FromSeconds(45);
     private const int UsbHyperVProbeFailureThresholdBeforeRestart = 12;
@@ -122,7 +128,11 @@ public sealed partial class App : Application
     private readonly ConcurrentDictionary<string, UsbDeviceAttachmentEntry> _hostUsbAttachmentsByBusId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbAutoConnectBackoffUntilUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbHeartbeatLastSentByBusId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _usbLastAttachSuccessUtcByBusId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _usbDetachHintSuppressionUntilUtcByBusId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _usbManualDisconnectPendingByBusId = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc, int Count, DateTimeOffset LastSignalUtc)> _usbAlreadyExportedNotAttachedStateByBusId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc, int Count, DateTimeOffset LastSignalUtc)> _usbPotentialLocalDetachStateByBusId = new(StringComparer.OrdinalIgnoreCase);
     private string? _selectedUsbBusId;
     private bool _isUsbClientAvailable;
     private bool _usbClientMissingLogged;
@@ -149,6 +159,8 @@ public sealed partial class App : Application
     private CancellationTokenSource? _sharedFolderAutoMountCts;
     private Task? _sharedFolderAutoMountTask;
     private readonly SemaphoreSlim _usbRefreshGate = new(1, 1);
+    private int _usbRefreshReplayRequested;
+    private readonly HyperVEventChannel _hyperVEventChannel = new();
     private DateTimeOffset _lastUsbRefreshCompletedUtc = DateTimeOffset.MinValue;
     private readonly GuestResourceMonitorAgent _resourceMonitorAgent = new();
     private readonly SystemResourceSampler _diagnosticsResourceSampler = new();
@@ -1630,6 +1642,7 @@ public sealed partial class App : Application
 
             _usbHyperVSocketProxy?.Dispose();
             _usbHyperVSocketProxy = null;
+            _hyperVEventChannel.Dispose();
 
             _winFspMountService.Dispose();
             _resourceMonitorAgent.Dispose();
@@ -2194,6 +2207,7 @@ public sealed partial class App : Application
 
         if (!await _usbRefreshGate.WaitAsync(0))
         {
+            Interlocked.Exchange(ref _usbRefreshReplayRequested, 1);
             if (emitLogs)
             {
                 GuestLogger.Debug("usb.refresh.skipped_busy", "USB-Refresh übersprungen, weil bereits ein Lauf aktiv ist.");
@@ -2398,6 +2412,8 @@ public sealed partial class App : Application
                 ApplyHostUsbMetadata(device);
             }
 
+            SyncUsbManualDisconnectPendingState(list);
+
             var effectiveHostAddress = fallbackToIpUsed && !string.IsNullOrWhiteSpace(fallbackHostAddress)
                 ? fallbackHostAddress
                 : hostResolution.ResolvedIpv4;
@@ -2447,22 +2463,16 @@ public sealed partial class App : Application
 
                 if (lostAttachedBusIds.Count > 0)
                 {
-                    foreach (var lostBusId in lostAttachedBusIds)
-                    {
-                        await TrySendUsbConnectionEventAckAsync(lostBusId, "usb-disconnected", CancellationToken.None);
-                    }
-
-                    GuestLogger.Warn("usb.refresh.detected_local_detach", "USB im Guest nicht mehr attached; Host wurde per usb-disconnected informiert.", new
-                    {
+                    await TryProcessPotentialLocalDetachSignalsAsync(
+                        lostAttachedBusIds,
                         operationId,
-                        busIds = lostAttachedBusIds,
-                        count = lostAttachedBusIds.Count,
-                        hostAddress = hostResolution.ResolvedIpv4,
-                        hostSource = hostResolution.Source,
-                        transportPath = fallbackToIpUsed
-                            ? "hyperv"
-                            : (string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase) ? "hyperv" : "hyperv")
-                    });
+                        hostResolution,
+                        fallbackToIpUsed);
+                }
+
+                foreach (var stillAttachedBusId in currentlyAttachedBusIds)
+                {
+                    _usbPotentialLocalDetachStateByBusId.Remove(stillAttachedBusId);
                 }
             }
 
@@ -2568,6 +2578,13 @@ public sealed partial class App : Application
         {
             _lastUsbRefreshCompletedUtc = DateTimeOffset.UtcNow;
             _usbRefreshGate.Release();
+
+            if (Interlocked.Exchange(ref _usbRefreshReplayRequested, 0) == 1)
+            {
+                SafeFireAndForget.Run(
+                    RefreshUsbDevicesAsync(emitLogs: false),
+                    operation: "usb-refresh-replay");
+            }
         }
     }
 
@@ -2634,28 +2651,126 @@ public sealed partial class App : Application
 
         foreach (var busId in danglingAttachedBusIds)
         {
-            try
+            GuestLogger.Debug("usb.cleanup.dangling_detach.skipped", "Dangling-Detach aus Refresh wurde zur Stabilisierung unterdrückt.", new
             {
-                await _usbService.DetachFromHostAsync(busId, hostAddress, CancellationToken.None);
-                await TrySendUsbConnectionEventAckAsync(busId, "usb-disconnected", CancellationToken.None);
-
-                GuestLogger.Info("usb.cleanup.dangling_detach", "Dangling USB-Anhang im Guest wurde hart getrennt.", new
-                {
-                    busId,
-                    hostAddress,
-                    reason = "host-device-missing"
-                });
-            }
-            catch (Exception ex)
-            {
-                GuestLogger.Warn("usb.cleanup.dangling_detach_failed", ex.Message, new
-                {
-                    busId,
-                    hostAddress,
-                    exceptionType = ex.GetType().FullName
-                });
-            }
+                busId,
+                hostAddress,
+                reason = "stability-guard"
+            });
         }
+    }
+
+    private async Task TryProcessPotentialLocalDetachSignalsAsync(
+        IReadOnlyList<string> lostAttachedBusIds,
+        string operationId,
+        UsbHostResolution hostResolution,
+        bool fallbackToIpUsed)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var confirmedDetachBusIds = new List<string>();
+        var analyzedBusIds = new List<string>();
+
+        foreach (var rawBusId in lostAttachedBusIds)
+        {
+            var normalizedBusId = (rawBusId ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalizedBusId))
+            {
+                continue;
+            }
+
+            if (_usbManualDisconnectPendingByBusId.ContainsKey(normalizedBusId))
+            {
+                _usbPotentialLocalDetachStateByBusId.Remove(normalizedBusId);
+                continue;
+            }
+
+            analyzedBusIds.Add(normalizedBusId);
+
+            if (IsAutoDisconnectSuppressedAfterAttach(normalizedBusId, out var remainingSeconds))
+            {
+                GuestLogger.Debug("usb.refresh.local_detach_suppressed_recent_attach", "Automatisches usb-disconnected nach frischem Attach unterdrückt.", new
+                {
+                    operationId,
+                    busId = normalizedBusId,
+                    remainingSuppressionSeconds = remainingSeconds
+                });
+                continue;
+            }
+
+            var state = _usbPotentialLocalDetachStateByBusId.TryGetValue(normalizedBusId, out var existing)
+                ? existing
+                : (FirstSeenUtc: now, LastSeenUtc: now, Count: 0, LastSignalUtc: DateTimeOffset.MinValue);
+
+            state = (state.FirstSeenUtc, now, state.Count + 1, state.LastSignalUtc);
+            _usbPotentialLocalDetachStateByBusId[normalizedBusId] = state;
+
+            if (state.Count < GuestLocalDetachSignalThreshold)
+            {
+                continue;
+            }
+
+            if ((now - state.FirstSeenUtc) < TimeSpan.FromSeconds(GuestLocalDetachSignalMinAgeSeconds))
+            {
+                continue;
+            }
+
+            if (state.LastSignalUtc != DateTimeOffset.MinValue
+                && (now - state.LastSignalUtc) < UsbStaleExportHintMinInterval)
+            {
+                continue;
+            }
+
+            var confirmedLocalDetach = await ConfirmGuestLocalDetachAsync(normalizedBusId, CancellationToken.None);
+            if (!confirmedLocalDetach)
+            {
+                _usbPotentialLocalDetachStateByBusId.Remove(normalizedBusId);
+                GuestLogger.Debug("usb.refresh.local_detach_recheck_attached", "Lokaler Recheck zeigte weiterhin Attach; usb-disconnected wurde verworfen.", new
+                {
+                    operationId,
+                    busId = normalizedBusId
+                });
+                continue;
+            }
+
+            await TrySendUsbConnectionEventAckAsync(normalizedBusId, "usb-disconnected", CancellationToken.None);
+
+            state = (state.FirstSeenUtc, state.LastSeenUtc, state.Count, now);
+            _usbPotentialLocalDetachStateByBusId[normalizedBusId] = state;
+            confirmedDetachBusIds.Add(normalizedBusId);
+        }
+
+        if (confirmedDetachBusIds.Count > 0)
+        {
+            GuestLogger.Warn("usb.refresh.detected_local_detach", "USB im Guest nicht mehr attached; Host wurde per usb-disconnected informiert.", new
+            {
+                operationId,
+                busIds = confirmedDetachBusIds,
+                count = confirmedDetachBusIds.Count,
+                hostAddress = hostResolution.ResolvedIpv4,
+                hostSource = hostResolution.Source,
+                transportPath = fallbackToIpUsed
+                    ? "hyperv"
+                    : (string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase) ? "hyperv" : "hyperv")
+            });
+
+            return;
+        }
+
+        if (analyzedBusIds.Count == 0)
+        {
+            return;
+        }
+
+        GuestLogger.Debug("usb.refresh.local_detach_debounced", "Kurzzeitiger Attach-Verlust erkannt; usb-disconnected wurde noch nicht gesendet.", new
+        {
+            operationId,
+            busIds = analyzedBusIds,
+            count = analyzedBusIds.Count,
+            threshold = GuestLocalDetachSignalThreshold,
+            minAgeSeconds = GuestLocalDetachSignalMinAgeSeconds,
+            hostAddress = hostResolution.ResolvedIpv4,
+            hostSource = hostResolution.Source
+        });
     }
 
     private async Task<int> ConnectUsbAsync(string busId, bool skipCachedAttachedCheck = false)
@@ -2735,7 +2850,9 @@ public sealed partial class App : Application
         {
             await _usbService.AttachToHostAsync(busId, hostResolution.ResolvedIpv4, CancellationToken.None);
             _selectedUsbBusId = busId;
+            MarkUsbAttachSuccess(busId);
             _usbAlreadyExportedNotAttachedStateByBusId.Remove(busId);
+            _usbPotentialLocalDetachStateByBusId.Remove(busId);
             ApplyUsbTransportResolution(hostResolution);
 
             GuestLogger.Info("usb.connect.success", "USB Host-Attach erfolgreich.", new
@@ -2778,7 +2895,9 @@ public sealed partial class App : Application
                     await TrySendUsbConnectionEventAckAsync(busId, "usb-heartbeat", CancellationToken.None);
 
                     _selectedUsbBusId = busId;
+                    MarkUsbAttachSuccess(busId);
                     _usbAlreadyExportedNotAttachedStateByBusId.Remove(busId);
+                    _usbPotentialLocalDetachStateByBusId.Remove(busId);
                     ApplyUsbTransportResolution(hostResolution);
 
                     GuestLogger.Info("usb.connect.success", "USB Host-Attach bereits aktiv (already exported).", new
@@ -2840,7 +2959,9 @@ public sealed partial class App : Application
 
                     await TryRecoverAndRetryUsbAttachAsync(busId, hostResolution.ResolvedIpv4, CancellationToken.None);
                     _selectedUsbBusId = busId;
+                    MarkUsbAttachSuccess(busId);
                     _usbAlreadyExportedNotAttachedStateByBusId.Remove(busId);
+                    _usbPotentialLocalDetachStateByBusId.Remove(busId);
                     ApplyUsbTransportResolution(hostResolution);
 
                     GuestLogger.Info("usb.connect.success", "USB Host-Attach erfolgreich (Retry).", new
@@ -2885,7 +3006,9 @@ public sealed partial class App : Application
                     {
                         await _usbService.AttachToHostAsync(busId, ipFallbackResolution.ResolvedIpv4, CancellationToken.None);
                         _selectedUsbBusId = busId;
+                        MarkUsbAttachSuccess(busId);
                         _usbAlreadyExportedNotAttachedStateByBusId.Remove(busId);
+                        _usbPotentialLocalDetachStateByBusId.Remove(busId);
                         ApplyUsbTransportResolution(ipFallbackResolution, fallbackToIp: true);
 
                         GuestLogger.Info("usb.connect.success", "USB Host-Attach erfolgreich (Hyper-V).", new
@@ -2957,6 +3080,17 @@ public sealed partial class App : Application
             return;
         }
 
+        if (IsAutoDisconnectSuppressedAfterAttach(normalizedBusId, out var remainingSeconds))
+        {
+            GuestLogger.Debug("usb.connect.already_exported.recovery_signal_suppressed_recent_attach", "Stale-Export-Recovery unterdrückt, da Gerät frisch attached wurde.", new
+            {
+                operationId,
+                busId = normalizedBusId,
+                remainingSuppressionSeconds = remainingSeconds
+            });
+            return;
+        }
+
         var now = DateTimeOffset.UtcNow;
         var state = _usbAlreadyExportedNotAttachedStateByBusId.TryGetValue(normalizedBusId, out var existing)
             ? existing
@@ -2978,6 +3112,19 @@ public sealed partial class App : Application
         if (state.LastSignalUtc != DateTimeOffset.MinValue
             && (now - state.LastSignalUtc) < UsbStaleExportHintMinInterval)
         {
+            return;
+        }
+
+        var confirmedLocalDetach = await ConfirmGuestLocalDetachAsync(normalizedBusId, CancellationToken.None);
+        if (!confirmedLocalDetach)
+        {
+            _usbAlreadyExportedNotAttachedStateByBusId.Remove(normalizedBusId);
+            GuestLogger.Debug("usb.connect.already_exported.recovery_signal_recheck_attached", "Stale-Export-Recovery verworfen, da lokaler Recheck weiterhin Attach zeigt.", new
+            {
+                operationId,
+                busId = normalizedBusId,
+                count = state.Count
+            });
             return;
         }
 
@@ -3053,6 +3200,170 @@ public sealed partial class App : Application
                || message.Contains("driver is not installed", StringComparison.OrdinalIgnoreCase)
                || message.Contains("treiber ist nicht installiert", StringComparison.OrdinalIgnoreCase)
                || message.Contains("stelle sicher, dass usbip-win2 installiert ist", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void MarkUsbAttachSuccess(string busId)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return;
+        }
+
+        _usbLastAttachSuccessUtcByBusId[normalizedBusId] = DateTimeOffset.UtcNow;
+        _usbDetachHintSuppressionUntilUtcByBusId.TryRemove(normalizedBusId, out _);
+        _usbManualDisconnectPendingByBusId.TryRemove(normalizedBusId, out _);
+    }
+
+    private void MarkUsbLocalDetachInProgress(string busId)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return;
+        }
+
+        _usbLastAttachSuccessUtcByBusId.Remove(normalizedBusId);
+        _usbPotentialLocalDetachStateByBusId.Remove(normalizedBusId);
+        _usbAlreadyExportedNotAttachedStateByBusId.Remove(normalizedBusId);
+        _usbDetachHintSuppressionUntilUtcByBusId[normalizedBusId] = DateTimeOffset.UtcNow.AddSeconds(GuestLocalDetachHintSuppressionSeconds);
+        _usbManualDisconnectPendingByBusId[normalizedBusId] = DateTimeOffset.UtcNow;
+    }
+
+    private void SyncUsbManualDisconnectPendingState(IReadOnlyList<UsbIpDeviceInfo> remoteDevices)
+    {
+        if (_usbManualDisconnectPendingByBusId.IsEmpty)
+        {
+            return;
+        }
+
+        var snapshot = _usbManualDisconnectPendingByBusId.ToArray();
+        foreach (var entry in snapshot)
+        {
+            if (entry.Key is null)
+            {
+                continue;
+            }
+
+            var busId = entry.Key.Trim();
+            if (string.IsNullOrWhiteSpace(busId))
+            {
+                _usbManualDisconnectPendingByBusId.TryRemove(entry.Key, out _);
+                continue;
+            }
+
+            var matching = remoteDevices.FirstOrDefault(device =>
+                string.Equals(device.BusId?.Trim(), busId, StringComparison.OrdinalIgnoreCase));
+
+            if (matching is not null && IsGuestLocalAttachedDevice(matching))
+            {
+                continue;
+            }
+
+            if (_usbManualDisconnectPendingByBusId.TryRemove(busId, out var startedUtc))
+            {
+                GuestLogger.Debug("usb.disconnect.host_state_confirmed", "Host-Status nach manuellem Disconnect bestätigt; Pending-Markierung wurde entfernt.", new
+                {
+                    busId,
+                    pendingForMs = (int)Math.Max(0, (DateTimeOffset.UtcNow - startedUtc).TotalMilliseconds),
+                    remoteState = matching is null ? "missing" : (matching.IsAttached ? "attached-without-local-owner" : "detached")
+                });
+            }
+        }
+    }
+
+    private bool IsUsbDetachHintSuppressed(string busId)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return false;
+        }
+
+        if (!_usbDetachHintSuppressionUntilUtcByBusId.TryGetValue(normalizedBusId, out var untilUtc))
+        {
+            return false;
+        }
+
+        if (untilUtc <= DateTimeOffset.UtcNow)
+        {
+            _usbDetachHintSuppressionUntilUtcByBusId.TryRemove(normalizedBusId, out _);
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool IsAutoDisconnectSuppressedAfterAttach(string busId, out int remainingSeconds)
+    {
+        remainingSeconds = 0;
+
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return false;
+        }
+
+        if (!_usbLastAttachSuccessUtcByBusId.TryGetValue(normalizedBusId, out var attachedAtUtc))
+        {
+            return false;
+        }
+
+        var elapsed = DateTimeOffset.UtcNow - attachedAtUtc;
+        var suppressionWindow = TimeSpan.FromSeconds(GuestAutoDisconnectSuppressionSecondsAfterAttach);
+        if (elapsed >= suppressionWindow)
+        {
+            _usbLastAttachSuccessUtcByBusId.Remove(normalizedBusId);
+            return false;
+        }
+
+        remainingSeconds = (int)Math.Ceiling((suppressionWindow - elapsed).TotalSeconds);
+        return true;
+    }
+
+    private async Task<bool> ConfirmGuestLocalDetachAsync(string busId, CancellationToken cancellationToken)
+    {
+        var normalizedBusId = (busId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedBusId))
+        {
+            return false;
+        }
+
+        for (var attempt = 1; attempt <= GuestLocalDetachConfirmationAttempts; attempt++)
+        {
+            IReadOnlyList<UsbIpDeviceInfo> localDevices;
+            try
+            {
+                localDevices = await GetLocalUsbDevicesWithTimeoutAsync(cancellationToken);
+            }
+            catch
+            {
+                return false;
+            }
+
+            var stillAttached = localDevices.Any(device =>
+                string.Equals(device.BusId?.Trim(), normalizedBusId, StringComparison.OrdinalIgnoreCase)
+                && IsGuestLocalAttachedDevice(device));
+
+            if (stillAttached)
+            {
+                return false;
+            }
+
+            if (attempt < GuestLocalDetachConfirmationAttempts)
+            {
+                try
+                {
+                    await Task.Delay(GuestLocalDetachConfirmationDelayMs, cancellationToken);
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private static bool IsTransientHyperVTransportFailure(Exception exception)
@@ -3155,6 +3466,7 @@ public sealed partial class App : Application
         }
         catch (Exception ex)
         {
+            MarkHyperVServiceUnreachableImmediate();
             var socketException = GetSocketException(ex);
             lock (_hyperVSocketMetricsSync)
             {
@@ -3174,6 +3486,7 @@ public sealed partial class App : Application
                 },
                 "hyperv",
                 TimeSpan.FromMinutes(2));
+            UpdateUsbDiagnosticsPanel();
             return null;
         }
     }
@@ -3252,6 +3565,7 @@ public sealed partial class App : Application
         {
             await _usbService.DetachFromHostAsync(busId, hostResolution.ResolvedIpv4, CancellationToken.None);
             _selectedUsbBusId = busId;
+            MarkUsbLocalDetachInProgress(busId);
             ApplyUsbTransportResolution(hostResolution);
 
             GuestLogger.Info("usb.disconnect.success", "USB Host-Detach erfolgreich.", new
@@ -3281,6 +3595,7 @@ public sealed partial class App : Application
                     {
                         await _usbService.DetachFromHostAsync(busId, ipFallbackResolution.ResolvedIpv4, CancellationToken.None);
                         _selectedUsbBusId = busId;
+                        MarkUsbLocalDetachInProgress(busId);
                         ApplyUsbTransportResolution(ipFallbackResolution, fallbackToIp: true);
 
                         GuestLogger.Info("usb.disconnect.success", "USB Host-Detach erfolgreich (Hyper-V).", new
@@ -3954,6 +4269,7 @@ public sealed partial class App : Application
     {
         lock (_hyperVSocketMetricsSync)
         {
+            var connectionMetrics = HyperVSocketConnectionMetrics.GetSnapshot();
             return new
             {
                 hostIdentityFetchAttempts = _metricHostIdentityFetchAttempts,
@@ -3981,7 +4297,16 @@ public sealed partial class App : Application
                 hostResolutionCalls = _metricHostResolutionCalls,
                 hostResolutionHyperV = _metricHostResolutionHyperV,
                 hostResolutionOther = _metricHostResolutionOther,
-                hostResolutionFailures = _metricHostResolutionFailures
+                hostResolutionFailures = _metricHostResolutionFailures,
+                openedConnections = connectionMetrics.OpenedConnections,
+                closedConnections = connectionMetrics.ClosedConnections,
+                activeConnections = connectionMetrics.ActiveConnections,
+                failedConnects = connectionMetrics.FailedConnects,
+                reconnectAttempts = connectionMetrics.ReconnectAttempts,
+                requestsCoalesced = connectionMetrics.RequestsCoalesced,
+                backoffActivations = connectionMetrics.BackoffActivations,
+                circuitBreakerOpen = connectionMetrics.CircuitBreakerOpen,
+                openConnectionsByPurpose = connectionMetrics.OpenConnectionsByPurpose
             };
         }
     }
@@ -4004,7 +4329,7 @@ public sealed partial class App : Application
 
     private void TriggerSharedFolderReconnectCycle()
     {
-        _ = Task.Run(async () =>
+        SafeFireAndForget.Run(Task.Run(async () =>
         {
             if (!await _sharedFolderReconnectTriggerGate.WaitAsync(0))
             {
@@ -4051,7 +4376,7 @@ public sealed partial class App : Application
                 _sharedFolderReconnectTriggerGate.Release();
                 UpdateSharedFolderReconnectStatusPanel();
             }
-        });
+        }), operation: "sharedfolders-reconnect-trigger");
     }
 
     private async Task RunSharedFolderAutoMountLoopAsync(CancellationToken cancellationToken)
@@ -4840,6 +5165,16 @@ public sealed partial class App : Application
             ? attachment.GuestVmName.Trim()
             : (attachment.GuestComputerName ?? string.Empty).Trim();
 
+        var currentGuestName = (Environment.MachineName ?? string.Empty).Trim();
+        var attachmentGuestComputerName = (attachment.GuestComputerName ?? string.Empty).Trim();
+        var attachmentGuestVmName = (attachment.GuestVmName ?? string.Empty).Trim();
+        var hintTargetsCurrentGuest = !string.IsNullOrWhiteSpace(currentGuestName)
+            && (
+                string.Equals(attachmentGuestComputerName, currentGuestName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(attachmentGuestVmName, currentGuestName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(attachedGuest, currentGuestName, StringComparison.OrdinalIgnoreCase)
+            );
+
         var hasRemoteAttachmentHint = !string.IsNullOrWhiteSpace(attachedGuest)
             || !string.IsNullOrWhiteSpace((attachment.SourceVmId ?? string.Empty).Trim())
             || !string.IsNullOrWhiteSpace((attachment.ClientIpAddress ?? string.Empty).Trim());
@@ -4847,6 +5182,24 @@ public sealed partial class App : Application
         if (hasLocalPortAttachment)
         {
             // Preserve local attachment state from usbip client output.
+            return;
+        }
+
+        if (IsUsbDetachHintSuppressed(busId))
+        {
+            // During local detach propagation, ignore stale host hints that would show Busy.
+            device.IsAttachedByOtherGuest = false;
+            device.AttachedGuestComputerName = string.Empty;
+            device.ClientIpAddress = string.Empty;
+            return;
+        }
+
+        if (hintTargetsCurrentGuest)
+        {
+            // Stale self-hints must not be treated as foreign attachment.
+            device.IsAttachedByOtherGuest = false;
+            device.AttachedGuestComputerName = string.Empty;
+            device.ClientIpAddress = string.Empty;
             return;
         }
 
@@ -4967,10 +5320,12 @@ public sealed partial class App : Application
 
             try
             {
-                using var gateLease = await HyperVSocketClientConcurrencyGate.AcquireAsync(linkedCts.Token);
                 using var socket = new System.Net.Sockets.Socket((System.Net.Sockets.AddressFamily)34, System.Net.Sockets.SocketType.Stream, (System.Net.Sockets.ProtocolType)1);
                 linkedCts.Token.ThrowIfCancellationRequested();
-                socket.Connect(new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, serviceId));
+                var endpoint = new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, serviceId);
+                var connectTask = Task.Run(() => socket.Connect(endpoint), CancellationToken.None);
+                await connectTask.WaitAsync(linkedCts.Token);
+                linkedCts.Token.ThrowIfCancellationRequested();
                 return true;
             }
             catch
@@ -5103,7 +5458,6 @@ public sealed partial class App : Application
         else
         {
             _usbHyperVSocketProbeFailureCount = Math.Max(_usbHyperVSocketProbeFailureCount + 1, 3);
-            _usbHyperVSocketServiceReachable = false;
             lock (_hyperVSocketMetricsSync)
             {
                 _metricTransportSelfTestFailures++;
@@ -5120,6 +5474,17 @@ public sealed partial class App : Application
             registryServiceOk
         });
 
+        if (hyperVSocketActive && registryServiceOk)
+        {
+            GuestLogger.Info("usb.transport.hyperv.test.stable", "Hyper-V Socket ist stabil erreichbar.", new
+            {
+                hyperVSocketActive,
+                registryServiceOk,
+                serviceReachable = _usbHyperVSocketServiceReachable,
+                probeFailureCount = _usbHyperVSocketProbeFailureCount
+            });
+        }
+
         try
         {
             await SendHyperVDiagnosticsAckAsync(Environment.MachineName, hyperVSocketActive, registryServiceOk, CancellationToken.None);
@@ -5135,9 +5500,21 @@ public sealed partial class App : Application
                 hyperVSocketActive,
                 registryServiceOk
             });
+
+            if (hyperVSocketActive && registryServiceOk)
+            {
+                GuestLogger.Info("usb.transport.hyperv.test.stable.host_ack", "Hyper-V Socket Stabilitäts-Status an Host bestätigt.", new
+                {
+                    guestComputerName = Environment.MachineName,
+                    hyperVSocketActive,
+                    registryServiceOk
+                });
+            }
         }
         catch (Exception ex)
         {
+            MarkHyperVServiceUnreachableImmediate();
+            UpdateUsbDiagnosticsPanel();
             lock (_hyperVSocketMetricsSync)
             {
                 _metricDiagnosticsAckFailed++;
@@ -5169,43 +5546,31 @@ public sealed partial class App : Application
         var (guestCpuPercent, guestRamUsedGb, guestRamTotalGb) = _diagnosticsResourceSampler.Sample();
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        linkedCts.CancelAfter(TimeSpan.FromMilliseconds(1200));
+        linkedCts.CancelAfter(TimeSpan.FromMilliseconds(3200));
 
-        using var gateLease = await HyperVSocketClientConcurrencyGate.AcquireAsync(linkedCts.Token);
-        using var socket = new System.Net.Sockets.Socket((System.Net.Sockets.AddressFamily)34, System.Net.Sockets.SocketType.Stream, (System.Net.Sockets.ProtocolType)1);
-        linkedCts.Token.ThrowIfCancellationRequested();
-        socket.Connect(new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, HyperVSocketUsbTunnelDefaults.DiagnosticsServiceId));
-
-        await using var stream = new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
-        await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 256, leaveOpen: false)
+        var diagnosticsAck = new HyperVSocketDiagnosticsAck
         {
-            NewLine = "\n"
+            GuestComputerName = guestComputerName,
+            HyperVSocketActive = hyperVSocketActive,
+            RegistryServiceOk = registryServiceOk,
+            GuestIpv4Address = guestNetwork.Item1,
+            GuestIpv4SubnetMask = guestNetwork.Item2,
+            GuestIpv4Gateway = guestNetwork.Item3,
+            GuestNetworkAdapterName = guestNetwork.Item4,
+            GuestCpuPercent = Math.Round(guestCpuPercent, 1),
+            GuestRamUsedGb = Math.Round(guestRamUsedGb, 2),
+            GuestRamTotalGb = Math.Round(guestRamTotalGb, 2),
+            GuestIpv4Entries = guestNetworks.Select(entry => new HyperVSocketGuestIpv4Entry
+            {
+                Ipv4Address = entry.ipv4Address,
+                SubnetMask = entry.subnetMask,
+                Gateway = entry.gateway,
+                AdapterName = entry.adapterName
+            }).ToList(),
+            SentAtUtc = DateTime.UtcNow.ToString("O")
         };
 
-        var payload = JsonSerializer.Serialize(new
-        {
-            guestComputerName,
-            hyperVSocketActive,
-            registryServiceOk,
-            guestIpv4Address = guestNetwork.Item1,
-            guestIpv4SubnetMask = guestNetwork.Item2,
-            guestIpv4Gateway = guestNetwork.Item3,
-            guestNetworkAdapterName = guestNetwork.Item4,
-            guestCpuPercent = Math.Round(guestCpuPercent, 1),
-            guestRamUsedGb = Math.Round(guestRamUsedGb, 2),
-            guestRamTotalGb = Math.Round(guestRamTotalGb, 2),
-            guestIpv4Entries = guestNetworks.Select(entry => new
-            {
-                ipv4Address = entry.ipv4Address,
-                subnetMask = entry.subnetMask,
-                gateway = entry.gateway,
-                adapterName = entry.adapterName
-            }),
-            sentAtUtc = DateTime.UtcNow.ToString("O")
-        });
-
-        await writer.WriteLineAsync(payload.AsMemory(), linkedCts.Token);
-        await writer.FlushAsync(linkedCts.Token);
+        await _hyperVEventChannel.SendDiagnosticsAckAsync(diagnosticsAck, linkedCts.Token);
     }
 
     private async Task TrySendUsbConnectionEventAckAsync(string busId, string eventType, CancellationToken cancellationToken)
@@ -5216,24 +5581,13 @@ public sealed partial class App : Application
         }
 
         Exception? lastError = null;
-        const int maxAttempts = 4;
+        const int maxAttempts = 2;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                linkedCts.CancelAfter(TimeSpan.FromMilliseconds(1800));
-
-                using var gateLease = await HyperVSocketClientConcurrencyGate.AcquireAsync(linkedCts.Token);
-                using var socket = new System.Net.Sockets.Socket((System.Net.Sockets.AddressFamily)34, System.Net.Sockets.SocketType.Stream, (System.Net.Sockets.ProtocolType)1);
-                linkedCts.Token.ThrowIfCancellationRequested();
-                socket.Connect(new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, HyperVSocketUsbTunnelDefaults.DiagnosticsServiceId));
-
-                await using var stream = new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
-                await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 256, leaveOpen: false)
-                {
-                    NewLine = "\n"
-                };
+                linkedCts.CancelAfter(TimeSpan.FromMilliseconds(3600));
 
                 var guestNetworks = ResolveGuestIpv4Settings();
                 var guestNetwork = guestNetworks.Count > 0
@@ -5242,7 +5596,7 @@ public sealed partial class App : Application
                 var (guestCpuPercent, guestRamUsedGb, guestRamTotalGb) = _diagnosticsResourceSampler.Sample();
                 var currentDevice = FindUsbByBusId(busId);
 
-                var payload = JsonSerializer.Serialize(new HyperVSocketDiagnosticsAck
+                var diagnosticsAck = new HyperVSocketDiagnosticsAck
                 {
                     GuestComputerName = Environment.MachineName,
                     BusId = busId.Trim(),
@@ -5267,10 +5621,9 @@ public sealed partial class App : Application
                         Gateway = entry.gateway,
                         AdapterName = entry.adapterName
                     }).ToList()
-                });
+                };
 
-                await writer.WriteLineAsync(payload.AsMemory(), linkedCts.Token);
-                await writer.FlushAsync(linkedCts.Token);
+                await _hyperVEventChannel.SendDiagnosticsAckAsync(diagnosticsAck, linkedCts.Token);
                 lock (_hyperVSocketMetricsSync)
                 {
                     _metricUsbEventAckSent++;
@@ -5528,10 +5881,12 @@ public sealed partial class App : Application
     {
         var usesHyperVSocket = string.Equals(resolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase)
             && !string.IsNullOrWhiteSpace(resolution.ResolvedIpv4);
+        var effectiveHyperVActive = usesHyperVSocket && _usbHyperVSocketServiceReachable && !fallbackToIp;
 
-        var changed = _usbHyperVSocketTransportActive != usesHyperVSocket || _usbIpFallbackActive;
-        _usbHyperVSocketTransportActive = usesHyperVSocket;
-        _usbIpFallbackActive = false;
+        var changed = _usbHyperVSocketTransportActive != effectiveHyperVActive
+            || _usbIpFallbackActive != fallbackToIp;
+        _usbHyperVSocketTransportActive = effectiveHyperVActive;
+        _usbIpFallbackActive = fallbackToIp;
 
         if (!changed)
         {
@@ -5644,6 +5999,14 @@ public sealed partial class App : Application
         {
             _usbHyperVSocketServiceReachable = false;
         }
+    }
+
+    private void MarkHyperVServiceUnreachableImmediate()
+    {
+        _usbHyperVSocketServiceReachable = false;
+        _usbHyperVSocketTransportActive = false;
+        _lastHyperVDataPathSuccessUtc = DateTimeOffset.MinValue;
+        _hyperVDataPathConsecutiveFailures = Math.Max(_hyperVDataPathConsecutiveFailures, 3);
     }
 
     private bool HasRecentHyperVDataPathSuccess()
@@ -5766,6 +6129,8 @@ public sealed partial class App : Application
             _metricSharedFolderCatalogFetchFailures++;
             _lastSharedFolderCatalogFailure = $"{lastError?.GetType().Name}:{errorMessage} (Socket={socketDetails?.SocketErrorCode}, Native={socketDetails?.NativeErrorCode})";
         }
+        MarkHyperVServiceUnreachableImmediate();
+        UpdateUsbDiagnosticsPanel();
         GuestLogger.Warn("sharedfolders.catalog.fetch_failed", errorMessage, new
         {
             transport = "hyperv-socket",

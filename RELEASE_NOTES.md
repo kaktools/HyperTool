@@ -9,6 +9,7 @@
 - Guest-Start wurde gegen sporadische Concurrent-Collection-Fehler im USB-Refresh gehärtet.
 - Konfigurationsmigration bereinigt bestehende Installationen stärker und setzt neue USB-Defaults konsistent.
 - Guest USB-Transport ist jetzt vollständig Hyper-V-only; IP-Mode/IP-Fallback und zugehörige UI-Artefakte wurden entfernt.
+- Hyper-V Socket Selbsttest schreibt bei erfolgreicher Prüfung jetzt gezielte Stabilitäts-Logs im Guest und eine klare Bestätigung im Host.
 
 ### Verbessert
 
@@ -35,6 +36,8 @@
 	- Guest transportiert USB ausschließlich über Hyper-V Socket; Discovery/Fallback über IP ist deaktiviert.
 	- Guest-UI bereinigt: kein IP-Mode-Toggle, kein Host-IP-Eingabefeld, Transport-Diagnose ohne Fallback-Zeile.
 	- USB-Header-Chip auf klare Zustände umgestellt: aktiv (grün), inaktiv (grau), Fehler (rot).
+	- Guest-Transporttest loggt bei `Hyper-V Socket + Registry = OK` zusätzlich `usb.transport.hyperv.test.stable` sowie nach Ack `usb.transport.hyperv.test.stable.host_ack`.
+	- Host protokolliert erfolgreiche Guest-Diagnosen zusätzlich als `Hyper-V socket stability confirmed by guest diagnostics`.
 - Konfigurationsmigration/Setup-Hygiene:
 	- Bestehende Konfigurationen werden schema-basiert bereinigt und einmalig neu geschrieben.
 	- Legacy-/ungültige USB-Identity-Keys in `usb.autoShareDeviceKeys` und `usb.deviceMetadata` werden entfernt.

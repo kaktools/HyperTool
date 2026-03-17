@@ -97,7 +97,7 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
                 await _clientHandlerGate.WaitAsync(cancellationToken);
                 gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
-                _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
+                SafeFireAndForget.Run(HandleClientAsync(socket, cancellationToken), operation: "host-identity-listener-client");
             }
             catch (OperationCanceledException)
             {
@@ -127,7 +127,46 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
         try
         {
             await using var stream = new NetworkStream(socket, ownsSocket: true);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: true);
+            await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 1024, leaveOpen: false)
+            {
+                NewLine = "\n"
+            };
 
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                string? line;
+                try
+                {
+                    line = await reader.ReadLineAsync(cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    break;
+                }
+
+                if (line is null)
+                {
+                    break;
+                }
+
+                var payload = BuildIdentityPayload();
+                await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
+                await writer.FlushAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            _clientHandlerGate.Release();
+        }
+    }
+
+    private string BuildIdentityPayload()
+    {
         HostFeatureAvailability featureAvailability;
         try
         {
@@ -226,33 +265,20 @@ public sealed class HyperVSocketHostIdentityHostListener : IDisposable
             .Where(entry => !string.IsNullOrWhiteSpace(entry.BusId))
             .ToList();
 
-            var payload = JsonSerializer.Serialize(new
-            {
-                hostName = Environment.MachineName,
-                fqdn = ResolveFqdn(),
-                features = new
-                {
-                    usbSharingEnabled = featureAvailability.UsbSharingEnabled,
-                    sharedFoldersEnabled = featureAvailability.SharedFoldersEnabled,
-                    usbDeviceMetadata = featureAvailability.UsbDeviceMetadata,
-                    usbDeviceDescriptions = featureAvailability.UsbDeviceDescriptions,
-                    usbDeviceAttachments = featureAvailability.UsbDeviceAttachments
-                },
-                timestampUtc = DateTime.UtcNow
-            }, SerializerOptions);
-
-            await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 1024, leaveOpen: false)
-            {
-                NewLine = "\n"
-            };
-
-            await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
-            await writer.FlushAsync(cancellationToken);
-        }
-        finally
+        return JsonSerializer.Serialize(new
         {
-            _clientHandlerGate.Release();
-        }
+            hostName = Environment.MachineName,
+            fqdn = ResolveFqdn(),
+            features = new
+            {
+                usbSharingEnabled = featureAvailability.UsbSharingEnabled,
+                sharedFoldersEnabled = featureAvailability.SharedFoldersEnabled,
+                usbDeviceMetadata = featureAvailability.UsbDeviceMetadata,
+                usbDeviceDescriptions = featureAvailability.UsbDeviceDescriptions,
+                usbDeviceAttachments = featureAvailability.UsbDeviceAttachments
+            },
+            timestampUtc = DateTime.UtcNow
+        }, SerializerOptions);
     }
 
     private static string ResolveFqdn()

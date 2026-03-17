@@ -840,7 +840,7 @@ internal sealed class GuestMainWindow : Window
     {
         _diagHyperVSocketText.Text = hyperVSocketActive ? "Ja" : "Nein";
         _diagRegistryServiceText.Text = registryServicePresent ? "Ja" : "Nein";
-        _diagFallbackText.Text = "Nein";
+        _diagFallbackText.Text = fallbackActive ? "Ja" : "Nein";
         UpdateUsbTransportHeaderStatus();
     }
 

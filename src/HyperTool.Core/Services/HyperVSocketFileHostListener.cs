@@ -75,7 +75,7 @@ public sealed class HyperVSocketFileHostListener : IDisposable
                 await _clientHandlerGate.WaitAsync(cancellationToken);
                 gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
-                _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
+                SafeFireAndForget.Run(HandleClientAsync(socket, cancellationToken), operation: "file-host-listener-client");
             }
             catch (OperationCanceledException)
             {

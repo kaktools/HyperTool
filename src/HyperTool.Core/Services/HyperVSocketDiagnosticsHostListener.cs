@@ -64,7 +64,7 @@ public sealed class HyperVSocketDiagnosticsHostListener : IDisposable
                 await _clientHandlerGate.WaitAsync(cancellationToken);
                 gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
-                _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
+                SafeFireAndForget.Run(HandleClientAsync(socket, cancellationToken), operation: "diagnostics-host-listener-client");
             }
             catch (OperationCanceledException)
             {
@@ -97,34 +97,41 @@ public sealed class HyperVSocketDiagnosticsHostListener : IDisposable
             await using var stream = new NetworkStream(socket, ownsSocket: true);
             using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 512, leaveOpen: false);
 
-            string? line;
-            try
+            while (!cancellationToken.IsCancellationRequested)
             {
-                line = await reader.ReadLineAsync(cancellationToken);
-            }
-            catch
-            {
-                return;
-            }
+                string? line;
+                try
+                {
+                    line = await reader.ReadLineAsync(cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    break;
+                }
 
-            if (string.IsNullOrWhiteSpace(line))
-            {
-                return;
-            }
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    break;
+                }
 
-            var payload = line.Trim();
-            if (payload.Length == 0)
-            {
-                return;
-            }
+                var payload = line.Trim();
+                if (payload.Length == 0)
+                {
+                    continue;
+                }
 
-            var ack = ParseAckPayload(payload);
-            if (!string.IsNullOrWhiteSpace(sourceVmId) && string.IsNullOrWhiteSpace(ack.SourceVmId))
-            {
-                ack.SourceVmId = sourceVmId;
-            }
+                var ack = ParseAckPayload(payload);
+                if (!string.IsNullOrWhiteSpace(sourceVmId) && string.IsNullOrWhiteSpace(ack.SourceVmId))
+                {
+                    ack.SourceVmId = sourceVmId;
+                }
 
-            _onDiagnosticsAck(ack);
+                _onDiagnosticsAck(ack);
+            }
         }
         finally
         {

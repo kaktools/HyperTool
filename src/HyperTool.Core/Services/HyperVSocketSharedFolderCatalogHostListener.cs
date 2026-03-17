@@ -85,7 +85,7 @@ public sealed class HyperVSocketSharedFolderCatalogHostListener : IDisposable
                 await _clientHandlerGate.WaitAsync(cancellationToken);
                 gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
-                _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
+                SafeFireAndForget.Run(HandleClientAsync(socket, cancellationToken), operation: "sharedfolder-catalog-host-client");
             }
             catch (OperationCanceledException)
             {
@@ -115,34 +115,56 @@ public sealed class HyperVSocketSharedFolderCatalogHostListener : IDisposable
         try
         {
             await using var stream = new NetworkStream(socket, ownsSocket: true);
-
-            IReadOnlyList<HostSharedFolderDefinition> catalog;
-            try
-            {
-                catalog = _catalogProvider() ?? [];
-            }
-            catch
-            {
-                catalog = [];
-            }
-
-            var payload = JsonSerializer.Serialize(catalog.Select(item => new HostSharedFolderDefinition
-            {
-                Id = item.Id,
-                Label = item.Label,
-                LocalPath = item.LocalPath,
-                ShareName = item.ShareName,
-                Enabled = item.Enabled,
-                ReadOnly = item.ReadOnly
-            }).ToList(), CatalogSerializerOptions);
-
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: true);
             await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 1024, leaveOpen: false)
             {
                 NewLine = "\n"
             };
 
-            await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
-            await writer.FlushAsync(cancellationToken);
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                string? line;
+                try
+                {
+                    line = await reader.ReadLineAsync(cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    break;
+                }
+
+                if (line is null)
+                {
+                    break;
+                }
+
+                IReadOnlyList<HostSharedFolderDefinition> catalog;
+                try
+                {
+                    catalog = _catalogProvider() ?? [];
+                }
+                catch
+                {
+                    catalog = [];
+                }
+
+                var payload = JsonSerializer.Serialize(catalog.Select(item => new HostSharedFolderDefinition
+                {
+                    Id = item.Id,
+                    Label = item.Label,
+                    LocalPath = item.LocalPath,
+                    ShareName = item.ShareName,
+                    Enabled = item.Enabled,
+                    ReadOnly = item.ReadOnly
+                }).ToList(), CatalogSerializerOptions);
+
+                await writer.WriteLineAsync(payload.AsMemory(), cancellationToken);
+                await writer.FlushAsync(cancellationToken);
+            }
         }
         finally
         {

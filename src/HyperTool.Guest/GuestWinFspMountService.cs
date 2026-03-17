@@ -423,6 +423,8 @@ internal sealed class GuestWinFspMountService : IDisposable
 
 internal sealed class HyperToolRpcFileSystem : FileSystemBase
 {
+    private static readonly HyperVSocketFileGuestClient SharedFileClient = new();
+
     private readonly string? _defaultShareId;
     private string _volumeLabel;
     private Dictionary<string, string> _catalogByRoot;
@@ -1109,8 +1111,7 @@ internal sealed class HyperToolRpcFileSystem : FileSystemBase
             : request.RequestId;
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var client = new HyperVSocketFileGuestClient();
-        return client.SendAsync(request, cts.Token).GetAwaiter().GetResult();
+        return SharedFileClient.SendAsync(request, cts.Token).GetAwaiter().GetResult();
     }
 
     private static bool TryGetNode(object fileNode, out RpcPathHandle node)

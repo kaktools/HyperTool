@@ -13,6 +13,7 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 - Recovery bei stale Exports ist wieder begrenzt aktiv: Retry/Grace/Delay aus der Host-Config plus Guest-Signal bei wiederholtem `already exported`.
 - Guest nutzt für USB jetzt ausschließlich Hyper-V Socket; IP-Mode/IP-Fallback wurde entfernt.
 - USB-Header-Chip zeigt den Hyper-V-Zustand klar als aktiv (grün), inaktiv (grau) oder Fehler (rot).
+- Ein erfolgreicher Guest-Transporttest schreibt jetzt gezielte Stabilitäts-Logs (`usb.transport.hyperv.test.stable`), inklusive Host-Bestätigung.
 - Shared-Folder-Ersetzen im Guest ist korrigiert: Explorer-Dialog `Datei ersetzen` funktioniert ohne `Ungültige MS-DOS-Funktion`.
 
 ## Projekte
@@ -151,6 +152,8 @@ Hinweis zur Zuständigkeit:
 
 - Host: %LOCALAPPDATA%/HyperTool/logs (Fallback je nach Startkontext)
 - Guest: %ProgramData%/HyperTool/logs
+- Guest: Erfolgreicher Transporttest erzeugt `usb.transport.hyperv.test.stable` und nach erfolgreichem Ack `usb.transport.hyperv.test.stable.host_ack`.
+- Host: Erfolgreiche Guest-Diagnose mit Socket+Registry `OK` wird als `Hyper-V socket stability confirmed by guest diagnostics` protokolliert.
 
 ## Rechtehinweis
 

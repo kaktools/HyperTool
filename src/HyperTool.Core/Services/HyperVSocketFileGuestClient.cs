@@ -1,14 +1,17 @@
 using HyperTool.Models;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace HyperTool.Services;
 
 public sealed class HyperVSocketFileGuestClient
 {
-    private readonly Guid _serviceId;
+    private static readonly PersistentHyperVConnection SharedDefaultConnection = new(
+        HyperVSocketUsbTunnelDefaults.FileServiceId,
+        "control-file-service");
+
+    private readonly PersistentHyperVConnection _connection;
+    private readonly ConcurrentDictionary<string, Task<HostFileServiceResponse>> _inflightByKey = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -18,7 +21,9 @@ public sealed class HyperVSocketFileGuestClient
 
     public HyperVSocketFileGuestClient(Guid? serviceId = null)
     {
-        _serviceId = serviceId ?? HyperVSocketUsbTunnelDefaults.FileServiceId;
+        _connection = serviceId.HasValue
+            ? new PersistentHyperVConnection(serviceId.Value, "control-file-service")
+            : SharedDefaultConnection;
     }
 
     public Task<HostFileServiceResponse> PingAsync(CancellationToken cancellationToken)
@@ -46,32 +51,47 @@ public sealed class HyperVSocketFileGuestClient
             request.RequestId = Guid.NewGuid().ToString("N");
         }
 
-        return SendCoreAsync(request, cancellationToken);
+        var key = BuildCoalesceKey(request);
+        if (_inflightByKey.TryGetValue(key, out var existingTask) && !existingTask.IsCompleted)
+        {
+            HyperVSocketConnectionMetrics.OnRequestCoalesced();
+            return existingTask;
+        }
+
+        var startedTask = SendCoreAsync(request, cancellationToken);
+        if (!_inflightByKey.TryAdd(key, startedTask))
+        {
+            if (_inflightByKey.TryGetValue(key, out var inflightTask) && !inflightTask.IsCompleted)
+            {
+                HyperVSocketConnectionMetrics.OnRequestCoalesced();
+                return inflightTask;
+            }
+
+            _inflightByKey[key] = startedTask;
+        }
+
+        SafeFireAndForget.Run(
+            startedTask,
+            onError: _ => { },
+            operation: "file-request-coalesce-cleanup");
+
+        _ = startedTask.ContinueWith(
+            _ => _inflightByKey.TryRemove(key, out _),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        return startedTask;
     }
 
     private async Task<HostFileServiceResponse> SendCoreAsync(HostFileServiceRequest request, CancellationToken cancellationToken)
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        linkedCts.CancelAfter(TimeSpan.FromMilliseconds(6000));
-        using var gateLease = await HyperVSocketClientConcurrencyGate.AcquireAsync(linkedCts.Token);
-
-        using var socket = new Socket((AddressFamily)34, SocketType.Stream, (ProtocolType)1);
-        linkedCts.Token.ThrowIfCancellationRequested();
-        var endpoint = new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, _serviceId);
-        ConnectWithRetry(socket, endpoint, linkedCts.Token);
-
-        await using var stream = new NetworkStream(socket, ownsSocket: true);
-        await using var writer = new StreamWriter(stream, Encoding.UTF8, bufferSize: 16 * 1024, leaveOpen: true)
-        {
-            NewLine = "\n"
-        };
-        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 16 * 1024, leaveOpen: false);
+        linkedCts.CancelAfter(TimeSpan.FromMilliseconds(8000));
 
         var payload = JsonSerializer.Serialize(request, SerializerOptions);
-        await writer.WriteLineAsync(payload.AsMemory(), linkedCts.Token);
-        await writer.FlushAsync(linkedCts.Token);
+        var responsePayload = await _connection.SendAndReceiveLineAsync(payload, linkedCts.Token);
 
-        var responsePayload = await reader.ReadLineAsync(linkedCts.Token);
         if (string.IsNullOrWhiteSpace(responsePayload))
         {
             throw new InvalidOperationException("Leere Antwort vom HyperTool File-Dienst.");
@@ -87,39 +107,20 @@ public sealed class HyperVSocketFileGuestClient
         return response;
     }
 
-    private static void ConnectWithRetry(Socket socket, EndPoint endpoint, CancellationToken cancellationToken)
+    private static string BuildCoalesceKey(HostFileServiceRequest request)
     {
-        const int maxAttempts = 3;
-        var delays = new[]
-        {
-            TimeSpan.FromMilliseconds(75),
-            TimeSpan.FromMilliseconds(220)
-        };
+        var op = (request.Operation ?? string.Empty).Trim().ToLowerInvariant();
+        var shareId = (request.ShareId ?? string.Empty).Trim().ToLowerInvariant();
+        var relative = (request.RelativePath ?? string.Empty).Trim().ToLowerInvariant();
+        var target = (request.TargetRelativePath ?? string.Empty).Trim().ToLowerInvariant();
+        var offset = request.Offset;
+        var length = request.Length;
 
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        if (op is "metadata" or "list-directory" or "list-shares" or "ping")
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                socket.Connect(endpoint);
-                return;
-            }
-            catch (SocketException ex) when (attempt < maxAttempts && IsTransientConnectSocketError(ex))
-            {
-                Task.Delay(delays[Math.Min(attempt - 1, delays.Length - 1)], cancellationToken).GetAwaiter().GetResult();
-            }
+            return $"{op}|{shareId}|{relative}";
         }
-    }
 
-    private static bool IsTransientConnectSocketError(SocketException ex)
-    {
-        return ex.SocketErrorCode is SocketError.NoBufferSpaceAvailable
-            or SocketError.TryAgain
-            or SocketError.TimedOut
-            or SocketError.ConnectionRefused
-            or SocketError.NetworkDown
-            or SocketError.NetworkUnreachable
-            or SocketError.HostDown
-            or SocketError.HostUnreachable;
+        return $"{op}|{shareId}|{relative}|{target}|{offset}|{length}|{request.RequestId}";
     }
 }

@@ -107,7 +107,7 @@ public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
                 await _subscriberGate.WaitAsync(cancellationToken);
                 gateEntered = true;
                 socket = await _listener.AcceptAsync(cancellationToken);
-                _ = Task.Run(() => HandleClientAsync(socket, cancellationToken), cancellationToken);
+                SafeFireAndForget.Run(HandleClientAsync(socket, cancellationToken), operation: "usb-change-subscriber-client");
             }
             catch (OperationCanceledException)
             {
