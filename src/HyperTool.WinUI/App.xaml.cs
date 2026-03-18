@@ -77,6 +77,7 @@ public sealed partial class App : Application
     private CancellationTokenSource? _usbEventRefreshCts;
     private readonly SemaphoreSlim _hostUsbRefreshGate = new(1, 1);
     private DateTimeOffset _lastHostUsbRefreshUtc = DateTimeOffset.MinValue;
+    private int _hostUsbRefreshReplayRequested;
     private static readonly TimeSpan ResourceMonitorFailureLogInterval = TimeSpan.FromMinutes(1);
     private DateTimeOffset _resourceMonitorLoopLastFailureLogUtc = DateTimeOffset.MinValue;
     private int _resourceMonitorLoopSuppressedFailures;
@@ -2046,6 +2047,11 @@ public sealed partial class App : Application
             {
                 await Task.Delay(TimeSpan.FromSeconds(2), refreshToken);
                 await RefreshHostUsbDevicesSafeAsync(force: true);
+
+                // Second pass: gives detach/unshare transitions more time to settle
+                // before the push-notification fingerprint is evaluated.
+                await Task.Delay(TimeSpan.FromSeconds(3), refreshToken);
+                await RefreshHostUsbDevicesSafeAsync(force: true);
             }
             catch (OperationCanceledException)
             {
@@ -2074,6 +2080,7 @@ public sealed partial class App : Application
 
         if (!await _hostUsbRefreshGate.WaitAsync(0))
         {
+            Interlocked.Exchange(ref _hostUsbRefreshReplayRequested, 1);
             return;
         }
 
@@ -2133,6 +2140,21 @@ public sealed partial class App : Application
         finally
         {
             _hostUsbRefreshGate.Release();
+
+            if (Interlocked.Exchange(ref _hostUsbRefreshReplayRequested, 0) == 1)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await RefreshHostUsbDevicesSafeAsync(force: true);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Debug(ex, "Deferred host USB refresh replay failed.");
+                    }
+                });
+            }
         }
     }
 

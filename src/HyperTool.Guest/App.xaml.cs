@@ -151,6 +151,7 @@ public sealed partial class App : Application
     private Task? _usbAutoRefreshTask;
     private CancellationTokenSource? _usbChangeNotificationSubscriberCts;
     private Task? _usbChangeNotificationSubscriberTask;
+    private CancellationTokenSource? _usbPushFollowUpRefreshCts;
     private CancellationTokenSource? _hyperVSocketMonitorCts;
     private Task? _hyperVSocketMonitorTask;
     private readonly GuestWinFspMountService _winFspMountService = GuestWinFspMountRegistry.Instance;
@@ -2188,15 +2189,20 @@ public sealed partial class App : Application
 
     private Task<IReadOnlyList<UsbIpDeviceInfo>> RefreshUsbDevicesAsync()
     {
-        return RefreshUsbDevicesAsync(emitLogs: true, bypassRateLimit: false);
+        return RefreshUsbDevicesAsync(emitLogs: true, bypassRateLimit: false, forceHostIdentityRefresh: false);
     }
 
     private async Task<IReadOnlyList<UsbIpDeviceInfo>> RefreshUsbDevicesAsync(bool emitLogs)
     {
-        return await RefreshUsbDevicesAsync(emitLogs, bypassRateLimit: false);
+        return await RefreshUsbDevicesAsync(emitLogs, bypassRateLimit: false, forceHostIdentityRefresh: false);
     }
 
     private async Task<IReadOnlyList<UsbIpDeviceInfo>> RefreshUsbDevicesAsync(bool emitLogs, bool bypassRateLimit)
+    {
+        return await RefreshUsbDevicesAsync(emitLogs, bypassRateLimit, forceHostIdentityRefresh: false);
+    }
+
+    private async Task<IReadOnlyList<UsbIpDeviceInfo>> RefreshUsbDevicesAsync(bool emitLogs, bool bypassRateLimit, bool forceHostIdentityRefresh)
     {
         if (!bypassRateLimit && !emitLogs && (DateTimeOffset.UtcNow - _lastUsbRefreshCompletedUtc) < TimeSpan.FromMilliseconds(1200))
         {
@@ -2324,12 +2330,13 @@ public sealed partial class App : Application
 
             if (useHyperVSocket
                 && useRemoteHostList
-                && (DateTimeOffset.UtcNow - _lastHostIdentityBackgroundAttemptUtc) >= TimeSpan.FromSeconds(GuestHostIdentityUsbRefreshSeconds))
+                && (forceHostIdentityRefresh
+                    || (DateTimeOffset.UtcNow - _lastHostIdentityBackgroundAttemptUtc) >= TimeSpan.FromSeconds(GuestHostIdentityUsbRefreshSeconds)))
             {
                 _lastHostIdentityBackgroundAttemptUtc = DateTimeOffset.UtcNow;
                 try
                 {
-                    var identity = await FetchHostIdentityViaHyperVSocketAsync(CancellationToken.None);
+                    var identity = await FetchHostIdentityViaHyperVSocketAsync(CancellationToken.None, forceRefresh: forceHostIdentityRefresh);
                     if (identity is not null)
                     {
                         ApplyHostIdentityToConfig(identity, persistConfig: false);
@@ -2506,7 +2513,18 @@ public sealed partial class App : Application
 
             if (useRemoteHostList && string.Equals(hostResolution.Source, "hyperv-socket", StringComparison.OrdinalIgnoreCase))
             {
-                await TryRefreshHostIdentityAfterUsbRefreshAsync(CancellationToken.None);
+                if (forceHostIdentityRefresh)
+                {
+                    var forcedIdentity = await FetchHostIdentityViaHyperVSocketAsync(CancellationToken.None, forceRefresh: true);
+                    if (forcedIdentity is not null)
+                    {
+                        ApplyHostIdentityToConfig(forcedIdentity, persistConfig: false);
+                    }
+                }
+                else
+                {
+                    await TryRefreshHostIdentityAfterUsbRefreshAsync(CancellationToken.None);
+                }
             }
 
             if (emitLogs)
@@ -3444,7 +3462,7 @@ public sealed partial class App : Application
         return null;
     }
 
-    private async Task<HostIdentityInfo?> FetchHostIdentityViaHyperVSocketAsync(CancellationToken cancellationToken)
+    private async Task<HostIdentityInfo?> FetchHostIdentityViaHyperVSocketAsync(CancellationToken cancellationToken, bool forceRefresh = false)
     {
         lock (_hyperVSocketMetricsSync)
         {
@@ -3454,7 +3472,7 @@ public sealed partial class App : Application
         try
         {
             var client = new HyperVSocketHostIdentityGuestClient();
-            var identity = await client.FetchHostIdentityAsync(cancellationToken);
+            var identity = await client.FetchHostIdentityAsync(cancellationToken, forceRefresh);
             ResetRateLimitedWarning("guest.hostidentity.fetch_failed", "hyperv");
 
             if (identity is not null)
@@ -3587,7 +3605,7 @@ public sealed partial class App : Application
 
                     await TrySendUsbConnectionEventAckAsync(busId, "usb-disconnected", CancellationToken.None);
             SafeFireAndForget.Run(
-                RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true),
+                        RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true),
                 operation: "usb-refresh-post-disconnect");
 
             return 0;
@@ -3619,7 +3637,7 @@ public sealed partial class App : Application
 
                         await TrySendUsbConnectionEventAckAsync(busId, "usb-disconnected", CancellationToken.None);
                         SafeFireAndForget.Run(
-                            RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true),
+                            RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true),
                             operation: "usb-refresh-post-disconnect-fallback");
 
                         return 0;
@@ -4024,6 +4042,17 @@ public sealed partial class App : Application
         _usbChangeNotificationSubscriberCts?.Dispose();
         _usbChangeNotificationSubscriberCts = null;
         _usbChangeNotificationSubscriberTask = null;
+
+        try
+        {
+            _usbPushFollowUpRefreshCts?.Cancel();
+        }
+        catch
+        {
+        }
+
+        _usbPushFollowUpRefreshCts?.Dispose();
+        _usbPushFollowUpRefreshCts = null;
     }
 
     private async Task RunUsbChangeNotificationSubscriberAsync(CancellationToken cancellationToken)
@@ -4076,7 +4105,43 @@ public sealed partial class App : Application
         _lastUsbPushRefreshTriggeredUtc = now;
 
         GuestLogger.Debug("usb.push.share_changed", "Host hat USB-Share-Änderung gemeldet. Sofortiger Refresh wird ausgelöst.");
-        _ = RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true);
+        _ = RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true);
+        ScheduleUsbPushFollowUpRefresh();
+    }
+
+    private void ScheduleUsbPushFollowUpRefresh()
+    {
+        try
+        {
+            _usbPushFollowUpRefreshCts?.Cancel();
+        }
+        catch
+        {
+        }
+
+        _usbPushFollowUpRefreshCts?.Dispose();
+        _usbPushFollowUpRefreshCts = new CancellationTokenSource();
+        var token = _usbPushFollowUpRefreshCts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // Delayed second pass to catch host-side detach/unshare propagation.
+                await Task.Delay(TimeSpan.FromSeconds(3), token);
+                await RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true, forceHostIdentityRefresh: true);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                GuestLogger.Debug("usb.push.followup_refresh_failed", ex.Message, new
+                {
+                    exceptionType = ex.GetType().FullName
+                });
+            }
+        }, token);
     }
 
     private async Task RunUsbAutoRefreshLoopAsync(CancellationToken cancellationToken)

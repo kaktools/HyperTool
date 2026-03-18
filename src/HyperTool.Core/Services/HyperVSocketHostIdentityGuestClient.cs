@@ -14,9 +14,9 @@ public sealed class HyperVSocketHostIdentityGuestClient
             : SharedControlChannel;
     }
 
-    public async Task<string?> FetchHostNameAsync(CancellationToken cancellationToken)
+    public async Task<string?> FetchHostNameAsync(CancellationToken cancellationToken, bool forceRefresh = false)
     {
-        var identity = await FetchHostIdentityAsync(cancellationToken);
+        var identity = await FetchHostIdentityAsync(cancellationToken, forceRefresh);
         if (identity is null)
         {
             return null;
@@ -35,8 +35,8 @@ public sealed class HyperVSocketHostIdentityGuestClient
         return null;
     }
 
-    public Task<HostIdentityInfo?> FetchHostIdentityAsync(CancellationToken cancellationToken)
+    public Task<HostIdentityInfo?> FetchHostIdentityAsync(CancellationToken cancellationToken, bool forceRefresh = false)
     {
-        return _controlChannel.FetchHostIdentityAsync(cancellationToken);
+        return _controlChannel.FetchHostIdentityAsync(cancellationToken, forceRefresh);
     }
 }
