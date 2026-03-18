@@ -2533,6 +2533,55 @@ public partial class MainViewModel : ViewModelBase
 
             if (runningVmIds.Contains(sourceVmId))
             {
+                if (!_usbForceDetachFallbackBusIds.Contains(busId)
+                    && withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
+                {
+                    try
+                    {
+                        var detached = await TryDetachBusWithRetryAsync(
+                            busId,
+                            initialDelay: TimeSpan.Zero,
+                            token,
+                            context: "running-vm-stale-guest-ack");
+
+                        if (detached)
+                        {
+                            _usbVmNotRunningSinceUtc.Remove(busId);
+                            _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                            _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                            _usbAttachedWithoutAckAttempts.Remove(busId);
+                            _usbForceDetachFallbackBusIds.Remove(busId);
+                            detachedCount++;
+
+                            Log.Information(
+                                "USB auto-detach executed after stale guest activity while VM still reports running. BusId={BusId}; SourceVmId={SourceVmId}; GraceSeconds={GraceSeconds}",
+                                busId,
+                                sourceVmId,
+                                (int)LoopbackManagedUsbAttachGraceFloor.TotalSeconds);
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        var attempt = _usbAttachedWithoutAckAttempts.TryGetValue(busId, out var existingAttempt)
+                            ? existingAttempt + 1
+                            : 1;
+                        _usbAttachedWithoutAckAttempts[busId] = attempt;
+
+                        if (attempt >= 3)
+                        {
+                            _usbForceDetachFallbackBusIds.Add(busId);
+                        }
+
+                        Log.Warning(
+                            ex,
+                            "USB auto-detach after stale guest activity failed while VM still reports running. BusId={BusId}; SourceVmId={SourceVmId}; Attempt={Attempt}",
+                            busId,
+                            sourceVmId,
+                            attempt);
+                    }
+                }
+
                 _usbVmNotRunningSinceUtc.Remove(busId);
                 _usbVmOffDetachManualRequiredBusIds.Remove(busId);
                 continue;

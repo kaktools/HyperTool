@@ -76,6 +76,7 @@ public sealed partial class App : Application
     private readonly object _sessionEndingHookSync = new();
     private bool _sessionEndingHookRegistered;
     private int _sessionEndingDisconnectStarted;
+    private int _sessionEndingShutdownBlockActive;
 
     private Mutex? _singleInstanceMutex;
     private CancellationTokenSource? _singleInstanceServerCts;
@@ -1796,14 +1797,17 @@ public sealed partial class App : Application
             disconnectOnExit = _config?.Usb?.DisconnectOnExit != false
         });
 
+        var shutdownBlockEnabled = TryEnableShutdownBlockReason(
+            "HyperTool Guest trennt USB-Verbindungen vor dem Herunterfahren …");
+
         try
         {
             var sessionEndingTask = Task.Run(TryDisconnectAllAttachedUsbOnSessionEndingAsync);
-            if (!sessionEndingTask.Wait(TimeSpan.FromSeconds(6)))
+            if (!sessionEndingTask.Wait(TimeSpan.FromSeconds(12)))
             {
                 GuestLogger.Warn("usb.session_ending_disconnect.timeout", "USB-Disconnect beim SessionEnding hat das Zeitbudget erreicht.", new
                 {
-                    timeoutSeconds = 6
+                    timeoutSeconds = 12
                 });
             }
         }
@@ -1813,6 +1817,80 @@ public sealed partial class App : Application
             {
                 exceptionType = ex.GetType().FullName
             });
+        }
+        finally
+        {
+            if (shutdownBlockEnabled)
+            {
+                TryDisableShutdownBlockReason();
+            }
+        }
+    }
+
+    private bool TryEnableShutdownBlockReason(string reason)
+    {
+        if (_mainWindow is null)
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 1) == 1)
+        {
+            return true;
+        }
+
+        try
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
+            if (hwnd == IntPtr.Zero)
+            {
+                Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
+                return false;
+            }
+
+            var created = ShutdownBlockReasonCreate(hwnd, reason);
+            if (!created)
+            {
+                Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
+                return false;
+            }
+
+            GuestLogger.Debug("ui.session_ending.shutdown_block.enabled", "Windows-Shutdown wurde temporär blockiert, um USB-Disconnect abzuschließen.", new
+            {
+                reason
+            });
+
+            return true;
+        }
+        catch
+        {
+            Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
+            return false;
+        }
+    }
+
+    private void TryDisableShutdownBlockReason()
+    {
+        if (_mainWindow is null)
+        {
+            Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
+            return;
+        }
+
+        try
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
+            if (hwnd != IntPtr.Zero)
+            {
+                _ = ShutdownBlockReasonDestroy(hwnd);
+            }
+        }
+        catch
+        {
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
         }
     }
 
@@ -6991,6 +7069,12 @@ public sealed partial class App : Application
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool ShutdownBlockReasonCreate(IntPtr hWnd, string pwszReason);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
