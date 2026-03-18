@@ -65,10 +65,14 @@ public sealed class ConfigService : IConfigService
         }
         catch (Exception ex)
         {
+            var backupPath = TryBackupCorruptConfig(configPath);
             Log.Error(ex, "Failed to load config. Recreating default config at {ConfigPath}", configPath);
 
             var fallbackConfig = HyperToolConfig.CreateDefault();
             var couldWriteFallback = TryWriteConfig(configPath, fallbackConfig);
+            var backupNotice = string.IsNullOrWhiteSpace(backupPath)
+                ? string.Empty
+                : $" Defekte Sicherung: {backupPath}";
 
             return new ConfigLoadResult
             {
@@ -76,8 +80,8 @@ public sealed class ConfigService : IConfigService
                 ConfigPath = configPath,
                 IsGenerated = true,
                 Notice = couldWriteFallback
-                    ? "Konfiguration war ungültig und wurde auf ein Beispiel zurückgesetzt."
-                    : "Konfiguration war ungültig und konnte wegen fehlender Schreibrechte nicht gespeichert werden. HyperTool läuft mit In-Memory-Defaults."
+                    ? $"Konfiguration war ungültig und wurde durch Standardwerte erneuert.{backupNotice}".Trim()
+                    : $"Konfiguration war ungültig und konnte wegen fehlender Schreibrechte nicht gespeichert werden. HyperTool läuft mit In-Memory-Defaults.{backupNotice}".Trim()
             };
         }
     }
@@ -125,6 +129,40 @@ public sealed class ConfigService : IConfigService
         {
             Log.Error(ex, "Config write failed for {ConfigPath}", configPath);
             return false;
+        }
+    }
+
+    private static string? TryBackupCorruptConfig(string configPath)
+    {
+        if (string.IsNullOrWhiteSpace(configPath) || !File.Exists(configPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var directoryPath = Path.GetDirectoryName(configPath);
+            if (!string.IsNullOrWhiteSpace(directoryPath))
+            {
+                Directory.CreateDirectory(directoryPath);
+            }
+
+            var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(configPath);
+            var extension = Path.GetExtension(configPath);
+            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmssfff");
+            var backupFileName = string.IsNullOrWhiteSpace(extension)
+                ? $"{fileNameWithoutExtension}.corrupt.{stamp}"
+                : $"{fileNameWithoutExtension}.corrupt.{stamp}{extension}";
+            var backupPath = Path.Combine(directoryPath ?? AppContext.BaseDirectory, backupFileName);
+            File.Copy(configPath, backupPath, overwrite: false);
+
+            Log.Warning("Corrupt config backup created at {BackupPath}", backupPath);
+            return backupPath;
+        }
+        catch (Exception backupEx)
+        {
+            Log.Warning(backupEx, "Failed to create corrupt config backup for {ConfigPath}", configPath);
+            return null;
         }
     }
 

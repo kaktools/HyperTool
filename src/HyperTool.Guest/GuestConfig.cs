@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
 
 namespace HyperTool.Guest;
 
@@ -290,18 +291,46 @@ internal static class GuestConfigService
             return config;
         }
 
-        var raw = File.ReadAllText(configPath);
-        var loaded = JsonSerializer.Deserialize<GuestConfig>(raw, SerializerOptions) ?? new GuestConfig();
-        var resetMigrationWasApplied = loaded.Usb?.UsbConfigResetMigrationApplied == true;
-        var hyperVOnlyCleanupWasApplied = loaded.Usb?.HyperVOnlyCleanupMigrationApplied == true;
-        Normalize(loaded);
-        if ((!resetMigrationWasApplied && loaded.Usb?.UsbConfigResetMigrationApplied == true)
-            || (!hyperVOnlyCleanupWasApplied && loaded.Usb?.HyperVOnlyCleanupMigrationApplied == true))
+        try
         {
-            Write(configPath, loaded);
+            var raw = File.ReadAllText(configPath);
+            var loaded = JsonSerializer.Deserialize<GuestConfig>(raw, SerializerOptions)
+                ?? throw new JsonException("Guest-Konfiguration konnte nicht deserialisiert werden.");
+            var resetMigrationWasApplied = loaded.Usb?.UsbConfigResetMigrationApplied == true;
+            var hyperVOnlyCleanupWasApplied = loaded.Usb?.HyperVOnlyCleanupMigrationApplied == true;
+            Normalize(loaded);
+            if ((!resetMigrationWasApplied && loaded.Usb?.UsbConfigResetMigrationApplied == true)
+                || (!hyperVOnlyCleanupWasApplied && loaded.Usb?.HyperVOnlyCleanupMigrationApplied == true))
+            {
+                Write(configPath, loaded);
+            }
+
+            created = false;
+            return loaded;
         }
-        created = false;
-        return loaded;
+        catch (Exception ex)
+        {
+            var backupPath = TryBackupBrokenConfig(configPath);
+            var fallback = new GuestConfig();
+            fallback.Usb ??= new GuestUsbSettings();
+            fallback.Usb.UsbConfigResetMigrationApplied = true;
+            fallback.Usb.UsbConfigResetMigrationInfoPending = false;
+            fallback.Usb.HyperVOnlyCleanupMigrationApplied = true;
+
+            Normalize(fallback);
+
+            try
+            {
+                Write(configPath, fallback);
+            }
+            catch
+            {
+            }
+
+            Debug.WriteLine($"[HyperTool.Guest] Defekte Konfiguration erkannt. Fallback auf Standardwerte. ConfigPath={configPath}; BackupPath={backupPath}; Error={ex.Message}");
+            created = true;
+            return fallback;
+        }
     }
 
     public static void Save(string configPath, GuestConfig config)
@@ -321,6 +350,37 @@ internal static class GuestConfigService
         var serializableConfig = CreateSerializableConfig(config);
         var json = JsonSerializer.Serialize(serializableConfig, SerializerOptions);
         File.WriteAllText(configPath, json);
+    }
+
+    private static string? TryBackupBrokenConfig(string configPath)
+    {
+        if (string.IsNullOrWhiteSpace(configPath) || !File.Exists(configPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var directoryPath = Path.GetDirectoryName(configPath);
+            if (!string.IsNullOrWhiteSpace(directoryPath))
+            {
+                Directory.CreateDirectory(directoryPath);
+            }
+
+            var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(configPath);
+            var extension = Path.GetExtension(configPath);
+            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmssfff");
+            var backupFileName = string.IsNullOrWhiteSpace(extension)
+                ? $"{fileNameWithoutExtension}.corrupt.{stamp}"
+                : $"{fileNameWithoutExtension}.corrupt.{stamp}{extension}";
+            var backupPath = Path.Combine(directoryPath ?? AppContext.BaseDirectory, backupFileName);
+            File.Copy(configPath, backupPath, overwrite: false);
+            return backupPath;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static void Normalize(GuestConfig config)

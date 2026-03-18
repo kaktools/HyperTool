@@ -15,6 +15,7 @@
 
 - Host USB Detach/Refresh:
 	- Explizite `usb-disconnected`-Events aus dem Guest lösen den Host-Detach immer aus (auch wenn der Auto-Detach-Config-Schalter deaktiviert ist).
+	- Debounce für Guest-Disconnect-getriggerten Host-Detach reduziert, damit der Host merklich schneller reagiert.
 	- Für explizite Guest-Disconnects entfällt die zusätzliche lange Grace-Wartezeit; nach Debounce erfolgt der Detach zeitnah.
 	- Während des Disconnect-Pfads blockiert die Grace-Phase keine regulären USB-Refreshes mehr.
 	- Physisch entfernte Geräte (`Attached` ohne `Connected`) werden beim Host-Refresh automatisch detacht.
@@ -25,6 +26,8 @@
 	- Ack-Identity priorisiert `busid` vor `hardware`, um Kollisionen zu reduzieren.
 	- Guest-Share-Liste hält Geräte mit Host-Attachment-Hinweis weiter als `Busy`, auch wenn `Connected By` kurzzeitig noch leer ist.
 - Guest Stabilität:
+	- Host-getriggerte USB-Change-Pushes umgehen im Guest das Refresh-Rate-Limit, damit Disconnect/Detach-/Re-Share-Zustände direkt sichtbar werden.
+	- Nach erfolgreichem Guest-Disconnect wird zusätzlich ein erzwungener USB-Refresh gestartet, um kurzzeitig hängende Busy-Zustände schneller aufzulösen.
 	- USB-Host-Caches wurden auf thread-safe Collections umgestellt; der sporadische Fehler `Operations that change non-concurrent collections...` nach Guest-Neustart ist behoben.
 	- Hyper-V-Socket-Clientpfade (File-Service, Shared-Folder-Katalog, Host-Identity, Diagnostics, Resource-Monitor) wurden auf ein gemeinsames Concurrency-Gating umgestellt, um Socket-Stürme (`NoBufferSpaceAvailable` / volle Warteschlangen) unter Last zu vermeiden.
 	- `NoBufferSpaceAvailable` wird beim Shared-Folder-Katalog jetzt als transient behandelt, damit Retry/Backoff greift statt sofortigem Abbruch.
@@ -43,6 +46,8 @@
 	- Legacy-/ungültige USB-Identity-Keys in `usb.autoShareDeviceKeys` und `usb.deviceMetadata` werden entfernt.
 	- Neuer Standardwert für `usb.autoDetachGracePeriodSeconds` ist `5` Sekunden.
 	- Bei Update-Installationen wird dieser Wert beim nächsten Laden einmalig auf `5` migriert; danach weiterhin frei konfigurierbar.
+	- Host: Defekte `HyperTool.config.json` wird beim Laden automatisch als `.corrupt.*` gesichert; anschließend Start mit Standardkonfiguration statt Abbruch.
+	- Guest: Defekte `HyperTool.Guest.json` wird beim Laden automatisch als `.corrupt.*` gesichert; anschließend Safe-Start mit Standardwerten.
 
 ### Doku
 

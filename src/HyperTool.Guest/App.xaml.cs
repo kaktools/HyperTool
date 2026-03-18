@@ -2188,12 +2188,17 @@ public sealed partial class App : Application
 
     private Task<IReadOnlyList<UsbIpDeviceInfo>> RefreshUsbDevicesAsync()
     {
-        return RefreshUsbDevicesAsync(emitLogs: true);
+        return RefreshUsbDevicesAsync(emitLogs: true, bypassRateLimit: false);
     }
 
     private async Task<IReadOnlyList<UsbIpDeviceInfo>> RefreshUsbDevicesAsync(bool emitLogs)
     {
-        if (!emitLogs && (DateTimeOffset.UtcNow - _lastUsbRefreshCompletedUtc) < TimeSpan.FromMilliseconds(1200))
+        return await RefreshUsbDevicesAsync(emitLogs, bypassRateLimit: false);
+    }
+
+    private async Task<IReadOnlyList<UsbIpDeviceInfo>> RefreshUsbDevicesAsync(bool emitLogs, bool bypassRateLimit)
+    {
+        if (!bypassRateLimit && !emitLogs && (DateTimeOffset.UtcNow - _lastUsbRefreshCompletedUtc) < TimeSpan.FromMilliseconds(1200))
         {
             if (emitLogs)
             {
@@ -3581,6 +3586,9 @@ public sealed partial class App : Application
             });
 
                     await TrySendUsbConnectionEventAckAsync(busId, "usb-disconnected", CancellationToken.None);
+            SafeFireAndForget.Run(
+                RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true),
+                operation: "usb-refresh-post-disconnect");
 
             return 0;
         }
@@ -3610,6 +3618,9 @@ public sealed partial class App : Application
                         });
 
                         await TrySendUsbConnectionEventAckAsync(busId, "usb-disconnected", CancellationToken.None);
+                        SafeFireAndForget.Run(
+                            RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true),
+                            operation: "usb-refresh-post-disconnect-fallback");
 
                         return 0;
                     }
@@ -4065,7 +4076,7 @@ public sealed partial class App : Application
         _lastUsbPushRefreshTriggeredUtc = now;
 
         GuestLogger.Debug("usb.push.share_changed", "Host hat USB-Share-Änderung gemeldet. Sofortiger Refresh wird ausgelöst.");
-        _ = RefreshUsbDevicesAsync(emitLogs: false);
+        _ = RefreshUsbDevicesAsync(emitLogs: false, bypassRateLimit: true);
     }
 
     private async Task RunUsbAutoRefreshLoopAsync(CancellationToken cancellationToken)

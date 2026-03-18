@@ -11,6 +11,9 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 - Der UI-Schalter für automatisches Detach wurde entfernt; die Option ist weiterhin per Config steuerbar.
 - Detach (manuell + Auto-Detach) läuft im Host ohne zusätzliche UAC-Elevation.
 - Recovery bei stale Exports ist wieder begrenzt aktiv: Retry/Grace/Delay aus der Host-Config plus Guest-Signal bei wiederholtem `already exported`.
+- Host reagiert bei `usb-disconnected` jetzt schneller (kürzeres Debounce), wodurch Auto-Detach deutlich früher greift.
+- Guest verarbeitet Host-USB-Änderungspushes jetzt mit erzwungenem Sofort-Refresh (ohne internes Rate-Limit), damit Busy/Detach-Zustände schneller konsistent werden.
+- Safe-Start für Konfigurationen: Bei defekter Host-/Guest-Config wird automatisch eine `.corrupt.*`-Sicherung angelegt und mit Standardwerten weitergestartet.
 - Guest nutzt für USB jetzt ausschließlich Hyper-V Socket; IP-Mode/IP-Fallback wurde entfernt.
 - USB-Header-Chip zeigt den Hyper-V-Zustand klar als aktiv (grün), inaktiv (grau) oder Fehler (rot).
 - Ein erfolgreicher Guest-Transporttest schreibt jetzt gezielte Stabilitäts-Logs (`usb.transport.hyperv.test.stable`), inklusive Host-Bestätigung.

@@ -32,7 +32,7 @@ public sealed partial class App : Application
     private const int HostUsbAutoRefreshSeconds = 5;
     private static readonly TimeSpan HostHyperVMonitorHeartbeatInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan HostUsbTunnelSelfHealBackoff = TimeSpan.FromSeconds(20);
-    private const int UsbDisconnectDebounceMilliseconds = 4500;
+    private const int UsbDisconnectDebounceMilliseconds = 1500;
     private const string SingleInstanceMutexName = @"Local\HyperTool.WinUI.SingleInstance";
     private const string SingleInstancePipeName = "HyperTool.WinUI.SingleInstance.Activate";
     private static readonly (string ServiceId, string ElementName)[] RequiredHyperVSocketServices =
