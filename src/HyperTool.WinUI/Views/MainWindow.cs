@@ -2387,11 +2387,6 @@ public sealed class MainWindow : Window
         trayAdapterRow.Children.Add(trayAdapterCombo);
         vmOverviewStack.Children.Add(trayAdapterRow);
 
-        vmOverviewStack.Children.Add(CreateCheckBox(
-            "Für diese VM immer mit Sitzungsbearbeitung öffnen",
-            () => _viewModel.SelectedVmOpenConsoleWithSessionEdit,
-            value => _viewModel.SelectedVmOpenConsoleWithSessionEdit = value));
-
         vmOverviewCard.Child = vmOverviewStack;
         vmGrid.Children.Add(vmOverviewCard);
 
@@ -2584,6 +2579,7 @@ public sealed class MainWindow : Window
         quickTogglesGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         quickTogglesGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         quickTogglesGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        quickTogglesGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
         var trayMenuCheck = CreateCheckBox("Tasktray-Menü aktiv", () => _viewModel.UiEnableTrayMenu, value => _viewModel.UiEnableTrayMenu = value);
         trayMenuCheck.Margin = new Thickness(0);
@@ -2644,8 +2640,17 @@ public sealed class MainWindow : Window
         Grid.SetRow(restoreNumLockCheck, 2);
         quickTogglesGrid.Children.Add(restoreNumLockCheck);
 
+        var openVmConnectWithSessionEditCheck = CreateCheckBox(
+            "Enhanced Sessios Modus",
+            () => _viewModel.UiOpenVmConnectWithSessionEdit,
+            value => _viewModel.UiOpenVmConnectWithSessionEdit = value);
+        openVmConnectWithSessionEditCheck.Margin = new Thickness(0);
+        Grid.SetColumn(openVmConnectWithSessionEditCheck, 0);
+        Grid.SetRow(openVmConnectWithSessionEditCheck, 3);
+        quickTogglesGrid.Children.Add(openVmConnectWithSessionEditCheck);
+
         Grid.SetColumn(themeInlineRow, 0);
-        Grid.SetRow(themeInlineRow, 3);
+        Grid.SetRow(themeInlineRow, 4);
         quickTogglesGrid.Children.Add(themeInlineRow);
 
         var updateCheck = CreateCheckBox("Beim Start auf Updates prüfen", () => _viewModel.UpdateCheckOnStartup, value => _viewModel.UpdateCheckOnStartup = value);

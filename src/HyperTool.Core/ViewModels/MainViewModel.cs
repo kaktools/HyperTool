@@ -6998,14 +6998,7 @@ public partial class MainViewModel : ViewModelBase
 
     private bool ShouldOpenConsoleWithSessionEdit(string vmName)
     {
-        var vm = AvailableVms.FirstOrDefault(item => string.Equals(item.Name, vmName, StringComparison.OrdinalIgnoreCase))
-                 ?? _configuredVmDefinitions.Values.FirstOrDefault(item => string.Equals(item.Name, vmName, StringComparison.OrdinalIgnoreCase));
-
-        if (vm is not null)
-        {
-            return vm.OpenConsoleWithSessionEdit;
-        }
-
+        _ = vmName;
         return UiOpenVmConnectWithSessionEdit;
     }
 
