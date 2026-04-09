@@ -302,7 +302,7 @@ internal sealed class GuestTrayControlCenterWindow : Window
         Grid.SetColumn(_refreshButton, 0);
         usbActions.Children.Add(_refreshButton);
 
-        _usbConnectButton.Content = "🔌  Connect";
+        _usbConnectButton.Content = "🔗  Connect";
         _usbConnectButton.Style = CreateActionButtonStyle();
         _usbConnectButton.HorizontalAlignment = HorizontalAlignment.Stretch;
         _usbConnectButton.HorizontalContentAlignment = HorizontalAlignment.Center;

@@ -1720,7 +1720,7 @@ public sealed class MainWindow : Window
 
         var vmNavButton = CreateNavButton("▶", "VM", 0);
         sidebarStack.Children.Add(vmNavButton);
-        var usbNavButton = CreateNavButton("🔌", "USB-Share", 1);
+        var usbNavButton = CreateNavButton("🔗", "USB-Share", 1);
         _usbNavButton = usbNavButton;
         sidebarStack.Children.Add(usbNavButton);
         var sharedFolderNavButton = CreateNavButton("📁", "Shared Folder", 2);

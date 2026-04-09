@@ -268,7 +268,7 @@ public sealed class TrayService : ITrayService
             }, "toggle-control-center")));
         }
 
-        var usbMenu = CreateMenuItem("USB", "🔌");
+        var usbMenu = CreateMenuItem("USB", "🔗");
         usbMenu.DropDownItems.Add(CreateMenuItem("Refresh", "⟳", (_, _) => ExecuteMenuAction(async () =>
         {
             if (_refreshUsbDevicesAction is null)

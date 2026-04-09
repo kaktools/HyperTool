@@ -1103,7 +1103,7 @@ internal sealed class GuestMainWindow : Window
         };
 
         var sidebarStack = new StackPanel { Spacing = 8 };
-        sidebarStack.Children.Add(CreateNavButton("🔌", "USB", 0));
+        sidebarStack.Children.Add(CreateNavButton("🔗", "USB", 0));
         sidebarStack.Children.Add(CreateNavButton("📁", "Shared Folder", 1));
         sidebarStack.Children.Add(CreateNavButton("⚙", "Einstellungen", 2));
         sidebarStack.Children.Add(CreateNavButton("ℹ", "Info", 3));
@@ -1760,7 +1760,7 @@ internal sealed class GuestMainWindow : Window
         actionRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
         _usbRefreshButton = CreateIconButton("⟳", "Refresh", onClick: async (_, _) => await RefreshUsbAsync());
-        _usbConnectButton = CreateIconButton("🔌", "Connect", onClick: async (_, _) => await ConnectUsbAsync());
+        _usbConnectButton = CreateIconButton("🔗", "Connect", onClick: async (_, _) => await ConnectUsbAsync());
         _usbDisconnectButton = CreateIconButton("⏏", "Disconnect", onClick: async (_, _) => await DisconnectUsbAsync());
 
         _usbRefreshButton.IsEnabled = IsUsbRefreshAvailable();
