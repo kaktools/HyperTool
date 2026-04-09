@@ -45,6 +45,9 @@ public sealed class MainWindow : Window
     private const string GuestRuntimeRepo = "HyperTool";
     private const string GuestRuntimeAssetHint = "HyperTool-Guest-Setup";
     private const string GuestSingleInstancePipeName = "HyperTool.Guest.SingleInstance.Activate";
+    private const string ProjectWebsiteUrl = "https://kaktools.de";
+    private const string DefaultProjectOwner = "KaKTools";
+    private const string DefaultProjectRepo = "HyperTool";
     private enum PerformanceDiscoIntensity
     {
         Soft,
@@ -167,6 +170,7 @@ public sealed class MainWindow : Window
     private Button? _usbShareButton;
     private Button? _usbUnshareButton;
     private Button? _usbDetachButton;
+    private Button? _usbUnbindAllButton;
     private Button? _mountIsoButton;
     private Button? _unmountIsoButton;
     private Button? _vmHostNetworkProfileActionButton;
@@ -2841,12 +2845,20 @@ public sealed class MainWindow : Window
         updateText.SetBinding(TextBlock.TextProperty, new Binding { Source = _viewModel, Path = new PropertyPath(nameof(MainViewModel.UpdateStatus)) });
         updateWrap.Children.Add(updateText);
 
-        var copyrightText = new TextBlock { Text = "Copyright: KaKTools", Opacity = 0.9, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+        var copyrightLink = new HyperlinkButton
+        {
+            Content = "Copyright: KaKTools",
+            NavigateUri = new Uri(ProjectWebsiteUrl),
+            Opacity = 0.9,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Padding = new Thickness(0)
+        };
 
         Grid.SetColumn(updateWrap, 0);
         infoStatusRow.Children.Add(updateWrap);
-        Grid.SetColumn(copyrightText, 1);
-        infoStatusRow.Children.Add(copyrightText);
+        Grid.SetColumn(copyrightLink, 1);
+        infoStatusRow.Children.Add(copyrightLink);
         panel.Children.Add(infoStatusRow);
 
         var infoCard = new Border
@@ -2868,18 +2880,28 @@ public sealed class MainWindow : Window
         linksGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         linksGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         linksGrid.Children.Add(new TextBlock { Text = "GitHub Owner", Opacity = 0.9 });
-        var ownerText = new TextBlock();
-        ownerText.SetBinding(TextBlock.TextProperty, new Binding { Source = _viewModel, Path = new PropertyPath(nameof(MainViewModel.GithubOwner)) });
-        Grid.SetColumn(ownerText, 1);
-        linksGrid.Children.Add(ownerText);
+        var ownerLink = new HyperlinkButton
+        {
+            Content = "KaKTools",
+            NavigateUri = new Uri(ProjectWebsiteUrl),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(0)
+        };
+        Grid.SetColumn(ownerLink, 1);
+        linksGrid.Children.Add(ownerLink);
         var repoLabel = new TextBlock { Text = "GitHub Repo", Opacity = 0.9 };
         Grid.SetRow(repoLabel, 1);
         linksGrid.Children.Add(repoLabel);
-        var repoText = new TextBlock();
-        repoText.SetBinding(TextBlock.TextProperty, new Binding { Source = _viewModel, Path = new PropertyPath(nameof(MainViewModel.GithubRepo)) });
-        Grid.SetColumn(repoText, 1);
-        Grid.SetRow(repoText, 1);
-        linksGrid.Children.Add(repoText);
+        var repoLink = new HyperlinkButton
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(0)
+        };
+        repoLink.SetBinding(ContentControl.ContentProperty, new Binding { Source = _viewModel, Path = new PropertyPath(nameof(MainViewModel.GithubRepo)) });
+        repoLink.Click += (_, _) => OpenProjectRepositoryPage();
+        Grid.SetColumn(repoLink, 1);
+        Grid.SetRow(repoLink, 1);
+        linksGrid.Children.Add(repoLink);
         infoStack.Children.Add(linksGrid);
         infoCard.Child = infoStack;
         panel.Children.Add(infoCard);
@@ -3043,12 +3065,14 @@ public sealed class MainWindow : Window
         actionRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         actionRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         actionRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        actionRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         actionRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
         _usbRefreshButton = CreateIconButton("⟳", "Refresh", _viewModel.RefreshUsbDevicesCommand);
         _usbShareButton = CreateIconButton("🔓", "Share", _viewModel.BindUsbDeviceCommand);
         _usbUnshareButton = CreateIconButton("🔒", "Unshare", _viewModel.UnbindUsbDeviceCommand);
         _usbDetachButton = CreateIconButton("⏏", "Detach", _viewModel.DetachUsbDeviceCommand);
+        _usbUnbindAllButton = CreateIconButton("🧹", "Unbind /all", _viewModel.UnbindAllUsbDevicesCommand);
 
         Grid.SetColumn(_usbRefreshButton, 0);
         actionRow.Children.Add(_usbRefreshButton);
@@ -3058,6 +3082,8 @@ public sealed class MainWindow : Window
         actionRow.Children.Add(_usbUnshareButton);
         Grid.SetColumn(_usbDetachButton, 3);
         actionRow.Children.Add(_usbDetachButton);
+        Grid.SetColumn(_usbUnbindAllButton, 4);
+        actionRow.Children.Add(_usbUnbindAllButton);
 
         _usbFeatureControlsPanel.Children.Add(actionRow);
 
@@ -3069,7 +3095,7 @@ public sealed class MainWindow : Window
         _usbAutoShareCheckBox.IsEnabled = _viewModel.SelectedUsbDevice is not null && _viewModel.UsbRuntimeAvailable;
         _usbAutoShareCheckBox.Checked += (_, _) => _viewModel.SelectedUsbDeviceAutoShareEnabled = true;
         _usbAutoShareCheckBox.Unchecked += (_, _) => _viewModel.SelectedUsbDeviceAutoShareEnabled = false;
-        Grid.SetColumn(_usbAutoShareCheckBox, 4);
+        Grid.SetColumn(_usbAutoShareCheckBox, 5);
         actionRow.Children.Add(_usbAutoShareCheckBox);
 
         _usbUnshareOnExitCheckBox.Content = "Beim Beenden Share aufheben";
@@ -3079,7 +3105,7 @@ public sealed class MainWindow : Window
         _usbUnshareOnExitCheckBox.IsChecked = _viewModel.UsbUnshareOnExit;
         _usbUnshareOnExitCheckBox.Checked += (_, _) => _viewModel.UsbUnshareOnExit = true;
         _usbUnshareOnExitCheckBox.Unchecked += (_, _) => _viewModel.UsbUnshareOnExit = false;
-        Grid.SetColumn(_usbUnshareOnExitCheckBox, 5);
+        Grid.SetColumn(_usbUnshareOnExitCheckBox, 6);
         actionRow.Children.Add(_usbUnshareOnExitCheckBox);
 
         _usbFeatureControlsPanel.Children.Add(_usbRuntimeHintText);
@@ -5756,6 +5782,29 @@ public sealed class MainWindow : Window
         await CreateVmQuickstartShortcutAsync();
     }
 
+    private void OpenProjectRepositoryPage()
+    {
+        var owner = string.IsNullOrWhiteSpace(_viewModel.GithubOwner)
+            ? DefaultProjectOwner
+            : _viewModel.GithubOwner.Trim();
+        var repo = string.IsNullOrWhiteSpace(_viewModel.GithubRepo)
+            ? DefaultProjectRepo
+            : _viewModel.GithubRepo.Trim();
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = $"https://github.com/{owner}/{repo}",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            _viewModel.PublishNotification($"Repository-Link konnte nicht geöffnet werden: {ex.Message}", "Error");
+        }
+    }
+
     private static MenuFlyoutItem CreateVmMenuItem(string text, Func<Task> action)
     {
         var item = new MenuFlyoutItem { Text = text };
@@ -6128,6 +6177,11 @@ public sealed class MainWindow : Window
         if (_usbDetachButton is not null)
         {
             _usbDetachButton.IsEnabled = usbInteractive;
+        }
+
+        if (_usbUnbindAllButton is not null)
+        {
+            _usbUnbindAllButton.IsEnabled = usbInteractive;
         }
 
         _usbUnshareOnExitCheckBox.IsEnabled = usbInteractive;

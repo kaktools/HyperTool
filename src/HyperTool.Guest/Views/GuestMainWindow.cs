@@ -51,6 +51,7 @@ internal sealed class GuestMainWindow : Window
     private const string WinFspRuntimeOwner = "winfsp";
     private const string WinFspRuntimeRepo = "winfsp";
     private const string WinFspRuntimeAssetHint = ".msi";
+    private const string ProjectWebsiteUrl = "https://kaktools.de";
 
     private readonly Func<Task<IReadOnlyList<UsbIpDeviceInfo>>> _refreshUsbDevicesAsync;
     private readonly Func<string, Task<int>> _connectUsbAsync;
@@ -3264,18 +3265,20 @@ internal sealed class GuestMainWindow : Window
         updateWrap.Children.Add(new TextBlock { Text = "Update-Status:", Opacity = 0.9 });
         updateWrap.Children.Add(_updateStatusValueText);
 
-        var copyrightText = new TextBlock
+        var copyrightLink = new HyperlinkButton
         {
-            Text = "Copyright: KaKTools",
+            Content = "Copyright: KaKTools",
+            NavigateUri = new Uri(ProjectWebsiteUrl),
             Opacity = 0.9,
             HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Center
+            VerticalAlignment = VerticalAlignment.Center,
+            Padding = new Thickness(0)
         };
 
         Grid.SetColumn(updateWrap, 0);
         infoStatusRow.Children.Add(updateWrap);
-        Grid.SetColumn(copyrightText, 1);
-        infoStatusRow.Children.Add(copyrightText);
+        Grid.SetColumn(copyrightLink, 1);
+        infoStatusRow.Children.Add(copyrightLink);
         panel.Children.Add(infoStatusRow);
 
         var projectCard = new Border
@@ -3290,8 +3293,38 @@ internal sealed class GuestMainWindow : Window
         var projectStack = new StackPanel { Spacing = 4 };
         projectStack.Children.Add(new TextBlock { Text = "HyperTool Projekt", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
         projectStack.Children.Add(new TextBlock { Text = "HyperTool Guest wird über GitHub Releases verteilt. Hier findest du Version, Update-Status und Release-Links.", TextWrapping = TextWrapping.Wrap, Opacity = 0.85 });
-        projectStack.Children.Add(new TextBlock { Text = "GitHub Owner: KaKTools", Opacity = 0.9 });
-        projectStack.Children.Add(new TextBlock { Text = "GitHub Repo: HyperTool", Opacity = 0.9 });
+
+        var linksGrid = new Grid { ColumnSpacing = 8, RowSpacing = 4 };
+        linksGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
+        linksGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        linksGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        linksGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        linksGrid.Children.Add(new TextBlock { Text = "GitHub Owner", Opacity = 0.9 });
+        var ownerLink = new HyperlinkButton
+        {
+            Content = UpdateOwner,
+            NavigateUri = new Uri(ProjectWebsiteUrl),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(0)
+        };
+        Grid.SetColumn(ownerLink, 1);
+        linksGrid.Children.Add(ownerLink);
+
+        var repoLabel = new TextBlock { Text = "GitHub Repo", Opacity = 0.9 };
+        Grid.SetRow(repoLabel, 1);
+        linksGrid.Children.Add(repoLabel);
+        var repoLink = new HyperlinkButton
+        {
+            Content = UpdateRepo,
+            NavigateUri = new Uri($"https://github.com/{UpdateOwner}/{UpdateRepo}"),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(0)
+        };
+        Grid.SetColumn(repoLink, 1);
+        Grid.SetRow(repoLink, 1);
+        linksGrid.Children.Add(repoLink);
+        projectStack.Children.Add(linksGrid);
         projectCard.Child = projectStack;
         panel.Children.Add(projectCard);
 

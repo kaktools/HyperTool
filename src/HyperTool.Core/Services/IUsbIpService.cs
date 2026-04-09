@@ -18,6 +18,8 @@ public interface IUsbIpService
 
     Task UnbindAsync(string busId, CancellationToken cancellationToken);
 
+    Task UnbindAllAsync(CancellationToken cancellationToken);
+
     Task UnbindByPersistedGuidAsync(string persistedGuid, CancellationToken cancellationToken);
 
     Task DetachAsync(string busId, CancellationToken cancellationToken);

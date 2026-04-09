@@ -222,6 +222,20 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         EnsureSuccess(result, $"USB-Freigabe für BUSID '{busId}' konnte nicht entfernt werden.");
     }
 
+    public async Task UnbindAllAsync(CancellationToken cancellationToken)
+    {
+        await EnsureReadyAsync(cancellationToken);
+        if (!IsProcessElevated())
+        {
+            var exitCode = await RunCommandElevatedAsync(["unbind", "--all"], cancellationToken);
+            EnsureSuccess(exitCode, "USB-Freigaben konnten nicht vollständig entfernt werden.");
+            return;
+        }
+
+        var result = await RunCommandAsync(["unbind", "--all"], cancellationToken);
+        EnsureSuccess(result, "USB-Freigaben konnten nicht vollständig entfernt werden.");
+    }
+
     public async Task UnbindByPersistedGuidAsync(string persistedGuid, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(persistedGuid))

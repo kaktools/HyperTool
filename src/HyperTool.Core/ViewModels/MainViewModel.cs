@@ -431,6 +431,8 @@ public partial class MainViewModel : ViewModelBase
 
     public IAsyncRelayCommand DetachUsbDeviceCommand { get; }
 
+    public IAsyncRelayCommand UnbindAllUsbDevicesCommand { get; }
+
     private readonly IHyperVService _hyperVService;
     private readonly IHnsService _hnsService;
     private readonly IConfigService _configService;
@@ -726,6 +728,7 @@ public partial class MainViewModel : ViewModelBase
         BindUsbDeviceCommand = new AsyncRelayCommand(BindSelectedUsbDeviceAsync, CanExecuteBindUsbAction);
         UnbindUsbDeviceCommand = new AsyncRelayCommand(UnbindSelectedUsbDeviceAsync, CanExecuteUnbindUsbAction);
         DetachUsbDeviceCommand = new AsyncRelayCommand(DetachSelectedUsbDeviceAsync, CanExecuteDetachUsbAction);
+        UnbindAllUsbDevicesCommand = new AsyncRelayCommand(UnbindAllUsbDevicesAsync, CanExecuteUnbindAllUsbAction);
 
         StartDefaultVmCommand = new AsyncRelayCommand(StartDefaultVmAsync, () => !IsBusy);
         StopDefaultVmCommand = new AsyncRelayCommand(StopDefaultVmAsync, () => !IsBusy);
@@ -800,6 +803,7 @@ public partial class MainViewModel : ViewModelBase
         BindUsbDeviceCommand.NotifyCanExecuteChanged();
         UnbindUsbDeviceCommand.NotifyCanExecuteChanged();
         DetachUsbDeviceCommand.NotifyCanExecuteChanged();
+        UnbindAllUsbDevicesCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(HasBusyProgress));
     }
 
@@ -903,6 +907,7 @@ public partial class MainViewModel : ViewModelBase
         BindUsbDeviceCommand?.NotifyCanExecuteChanged();
         UnbindUsbDeviceCommand?.NotifyCanExecuteChanged();
         DetachUsbDeviceCommand?.NotifyCanExecuteChanged();
+        UnbindAllUsbDevicesCommand?.NotifyCanExecuteChanged();
 
         if (!value)
         {
@@ -1130,6 +1135,7 @@ public partial class MainViewModel : ViewModelBase
         BindUsbDeviceCommand.NotifyCanExecuteChanged();
         UnbindUsbDeviceCommand.NotifyCanExecuteChanged();
         DetachUsbDeviceCommand.NotifyCanExecuteChanged();
+        UnbindAllUsbDevicesCommand.NotifyCanExecuteChanged();
         _suppressUsbAutoShareToggleHandling = true;
         try
         {
@@ -1304,6 +1310,13 @@ public partial class MainViewModel : ViewModelBase
                && SelectedUsbDevice.IsAttached;
     }
 
+        private bool CanExecuteUnbindAllUsbAction()
+        {
+            return !IsBusy
+                        && HostUsbSharingEnabled
+               && UsbRuntimeAvailable;
+        }
+
     private bool CanExecuteStartVmAction() => CanExecuteVmAction() && !IsRunningState(SelectedVmState);
 
 
@@ -1313,6 +1326,7 @@ public partial class MainViewModel : ViewModelBase
         BindUsbDeviceCommand.NotifyCanExecuteChanged();
         UnbindUsbDeviceCommand.NotifyCanExecuteChanged();
         DetachUsbDeviceCommand.NotifyCanExecuteChanged();
+        UnbindAllUsbDevicesCommand.NotifyCanExecuteChanged();
 
         if (!value && HostUsbSharingEnabled)
         {
@@ -3247,6 +3261,37 @@ public partial class MainViewModel : ViewModelBase
         });
 
         await LoadUsbDevicesAsync(showNotification: false);
+    }
+
+    private async Task UnbindAllUsbDevicesAsync()
+    {
+        if (!IsProcessElevated())
+        {
+            AddNotification("UAC wird angefordert für USB Unbind All...", "Info");
+        }
+
+        await ExecuteBusyActionAsync("Alle USB-Freigaben werden entfernt...", async token =>
+        {
+            await _usbIpService.UnbindAllAsync(token);
+            AddNotification("Alle USB-Freigaben wurden entfernt.", "Success");
+        });
+
+        try
+        {
+            await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false);
+
+            await Task.Delay(TimeSpan.FromSeconds(2), _lifetimeCancellation.Token);
+            await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: false, useBusyIndicator: false);
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "USB-Liste konnte nach Unbind All nicht vollständig aktualisiert werden.");
+            AddNotification("USB-Liste konnte nach Unbind All nicht vollständig aktualisiert werden.", "Warning");
+        }
     }
 
     private async Task EnsureSelectedVmNetworkSelectionAsync(bool showNotificationOnMissingSwitch)
