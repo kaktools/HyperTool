@@ -4,13 +4,11 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.6.0**
-- Schaltfläche für USB Unbind -all hinzugefügt.
-- Der Enhanced-Session-Modus für VM-Connect wird jetzt konsistent global über die UI-Einstellung gesteuert.
-- Die frühere VM-spezifische Option „Für diese VM immer mit Sitzungsbearbeitung öffnen“ wurde aus der VM-Übersicht entfernt.
-- In den Schnelleinstellungen gibt es dafür den zentralen Schalter „Enhanced Sessios Modus“.
-- Das USB-Menü in der Host-Navigation nutzt jetzt das Link-Symbol (`🔗`) statt des bisherigen Stecker-Symbols (`🔌`).
-- Öffnen von VM-Connect nutzt damit in allen Pfaden dieselbe, eindeutige Einstellung.
+- Version: **v2.6.1**
+- VMConnect-Hostname wird beim Start auf den aktuellen Rechnernamen synchronisiert (inklusive Aktualisierung nach Rechnerumbenennung).
+- Tray-Doppelklick zum Ein-/Ausblenden von Host und Guest wurde stabilisiert, besonders bei minimiertem Autostart.
+- Verbindungsfehler beim Öffnen von VMConnect behoben: ungültiger Startparameter `/fullscreen` wird nicht mehr verwendet.
+- Shutdown-Cleanup im USB-Pfad ist robuster und vermeidet störende `sc.exe`-Folgemeldungen beim Herunterfahren.
 
 ## Projekte
 

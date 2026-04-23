@@ -1700,24 +1700,9 @@ public sealed partial class App : Application
 
             _trayControlCenterService = new TrayControlCenterService(mainWindow.DispatcherQueue);
             _trayControlCenterService.Initialize(
-                showMainWindowAction: () =>
-                {
-                    mainWindow.ForceDismissStartupSplash();
-                    mainWindow.AppWindow.Show();
-                    mainWindow.Activate();
-                },
-                hideMainWindowAction: () => mainWindow.AppWindow.Hide(),
-                isMainWindowVisible: () =>
-                {
-                    try
-                    {
-                        return mainWindow.AppWindow?.IsVisible ?? true;
-                    }
-                    catch
-                    {
-                        return true;
-                    }
-                },
+                showMainWindowAction: () => EnqueueMainWindowAction(mainWindow, BringMainWindowToFront),
+                hideMainWindowAction: () => EnqueueMainWindowAction(mainWindow, () => mainWindow.AppWindow.Hide()),
+                isMainWindowVisible: () => GetMainWindowVisibility(mainWindow),
                 getUiTheme: () => mainViewModel.UiTheme,
                 getVms: () => mainViewModel.GetTrayVms(),
                 getVmAdapters: vmName => mainViewModel.GetVmNetworkAdaptersForTrayAsync(vmName),
@@ -1742,28 +1727,13 @@ public sealed partial class App : Application
 
             _trayService = new HyperTool.WinUI.Services.TrayService();
             _trayService.Initialize(
-                showAction: () =>
-                {
-                    mainWindow.ForceDismissStartupSplash();
-                    mainWindow.AppWindow.Show();
-                    mainWindow.Activate();
-                },
-                hideAction: () => mainWindow.AppWindow.Hide(),
+                showAction: () => EnqueueMainWindowAction(mainWindow, BringMainWindowToFront),
+                hideAction: () => EnqueueMainWindowAction(mainWindow, () => mainWindow.AppWindow.Hide()),
                 toggleControlCenterAction: () => _trayControlCenterService?.ToggleFull(),
                 toggleControlCenterCompactAction: () => _trayControlCenterService?.ToggleCompact(),
                 hideControlCenterAction: () => _trayControlCenterService?.Hide(),
                 getUiTheme: () => mainViewModel.UiTheme,
-                isWindowVisible: () =>
-                {
-                    try
-                    {
-                        return mainWindow.AppWindow?.IsVisible ?? true;
-                    }
-                    catch
-                    {
-                        return true;
-                    }
-                },
+                isWindowVisible: () => GetMainWindowVisibility(mainWindow),
                 isTrayMenuEnabled: () => mainViewModel.UiEnableTrayMenu,
                 getVms: () => mainViewModel.GetTrayVms(),
                 getSwitches: () => mainViewModel.GetTraySwitches(),
@@ -1788,6 +1758,70 @@ public sealed partial class App : Application
         catch (Exception ex)
         {
             Log.Error(ex, "Tray initialization failed. App continues without tray icon.");
+        }
+    }
+
+    private static void EnqueueMainWindowAction(MainWindow mainWindow, Action action)
+    {
+        try
+        {
+            if (mainWindow.DispatcherQueue.HasThreadAccess)
+            {
+                action();
+                return;
+            }
+
+            _ = mainWindow.DispatcherQueue.TryEnqueue(() =>
+            {
+                try
+                {
+                    action();
+                }
+                catch
+                {
+                }
+            });
+        }
+        catch
+        {
+        }
+    }
+
+    private static bool GetMainWindowVisibility(MainWindow mainWindow)
+    {
+        try
+        {
+            if (mainWindow.DispatcherQueue.HasThreadAccess)
+            {
+                return mainWindow.AppWindow?.IsVisible ?? true;
+            }
+
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!mainWindow.DispatcherQueue.TryEnqueue(() =>
+                {
+                    try
+                    {
+                        completion.TrySetResult(mainWindow.AppWindow?.IsVisible ?? true);
+                    }
+                    catch (Exception ex)
+                    {
+                        completion.TrySetException(ex);
+                    }
+                }))
+            {
+                return true;
+            }
+
+            if (!completion.Task.Wait(TimeSpan.FromMilliseconds(500)))
+            {
+                return true;
+            }
+
+            return completion.Task.Result;
+        }
+        catch
+        {
+            return true;
         }
     }
 

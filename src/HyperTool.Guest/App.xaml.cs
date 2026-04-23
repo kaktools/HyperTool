@@ -2230,23 +2230,21 @@ public sealed partial class App : Application
 
         var commonArguments = new object?[]
         {
-            (Action)(() =>
+            (Action)(() => EnqueueMainWindowAction(() =>
             {
-                _mainWindow!.ForceDismissStartupSplash();
-                _mainWindow!.AppWindow.Show();
-                _mainWindow.Activate();
+                BringMainWindowToFront();
                 UpdateTrayControlCenterView();
-            }),
-            (Action)(() =>
+            })),
+            (Action)(() => EnqueueMainWindowAction(() =>
             {
                 _mainWindow!.AppWindow.Hide();
                 UpdateTrayControlCenterView();
-            }),
+            })),
             (Action)ToggleTrayControlCenter,
             (Action)ToggleTrayControlCenter,
             (Action)HideTrayControlCenter,
             (Func<string>)(() => _mainWindow!.CurrentTheme),
-            (Func<bool>)(() => _mainWindow!.AppWindow.IsVisible),
+            (Func<bool>)GetMainWindowVisibility,
             (Func<bool>)(() => false),
             (Func<IReadOnlyList<VmDefinition>>)(() => Array.Empty<VmDefinition>()),
             (Func<IReadOnlyList<HyperVSwitchInfo>>)(() => Array.Empty<HyperVSwitchInfo>()),
@@ -2293,6 +2291,82 @@ public sealed partial class App : Application
         }
 
         throw new InvalidOperationException($"Unbekannte TrayService.Initialize-Signatur mit {parameterCount} Parametern.");
+    }
+
+    private void EnqueueMainWindowAction(Action action)
+    {
+        if (_mainWindow is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var queue = _mainWindow.DispatcherQueue;
+            if (queue.HasThreadAccess)
+            {
+                action();
+                return;
+            }
+
+            _ = queue.TryEnqueue(() =>
+            {
+                try
+                {
+                    action();
+                }
+                catch
+                {
+                }
+            });
+        }
+        catch
+        {
+        }
+    }
+
+    private bool GetMainWindowVisibility()
+    {
+        if (_mainWindow is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            var queue = _mainWindow.DispatcherQueue;
+            if (queue.HasThreadAccess)
+            {
+                return _mainWindow.AppWindow?.IsVisible ?? true;
+            }
+
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!queue.TryEnqueue(() =>
+                {
+                    try
+                    {
+                        completion.TrySetResult(_mainWindow.AppWindow?.IsVisible ?? true);
+                    }
+                    catch (Exception ex)
+                    {
+                        completion.TrySetException(ex);
+                    }
+                }))
+            {
+                return true;
+            }
+
+            if (!completion.Task.Wait(TimeSpan.FromMilliseconds(500)))
+            {
+                return true;
+            }
+
+            return completion.Task.Result;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     private void EnsureTrayControlCenterWindow()

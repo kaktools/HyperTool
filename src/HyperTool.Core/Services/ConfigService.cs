@@ -247,14 +247,35 @@ public sealed class ConfigService : IConfigService
             notices.Add("DefaultSwitchName war leer und wurde auf 'Default Switch' gesetzt.");
         }
 
-        if (string.IsNullOrWhiteSpace(config.VmConnectComputerName))
+        var currentHostComputerName = Environment.MachineName.Trim();
+        var normalizedVmConnectComputerName = config.VmConnectComputerName?.Trim() ?? string.Empty;
+        var normalizedLastKnownHostComputerName = config.LastKnownHostComputerName?.Trim() ?? string.Empty;
+
+        if (!string.Equals(normalizedVmConnectComputerName, currentHostComputerName, StringComparison.OrdinalIgnoreCase))
         {
-            config.VmConnectComputerName = Environment.MachineName;
+            config.VmConnectComputerName = currentHostComputerName;
             wasUpdated = true;
+
+            if (!string.IsNullOrWhiteSpace(normalizedLastKnownHostComputerName)
+                && !string.Equals(normalizedLastKnownHostComputerName, currentHostComputerName, StringComparison.OrdinalIgnoreCase))
+            {
+                notices.Add($"Host-Computername wurde geändert ({normalizedLastKnownHostComputerName} -> {currentHostComputerName}). VmConnectComputerName wurde automatisch aktualisiert.");
+                Log.Information(
+                    "Host computer name changed from {PreviousHostComputerName} to {CurrentHostComputerName}; VmConnectComputerName updated automatically.",
+                    normalizedLastKnownHostComputerName,
+                    currentHostComputerName);
+            }
+            else
+            {
+                Log.Information(
+                    "VmConnectComputerName updated to current host computer name {CurrentHostComputerName}.",
+                    currentHostComputerName);
+            }
         }
-        else if (string.Equals(config.VmConnectComputerName.Trim(), "localhost", StringComparison.OrdinalIgnoreCase))
+
+        if (!string.Equals(normalizedLastKnownHostComputerName, currentHostComputerName, StringComparison.OrdinalIgnoreCase))
         {
-            config.VmConnectComputerName = Environment.MachineName;
+            config.LastKnownHostComputerName = currentHostComputerName;
             wasUpdated = true;
         }
 

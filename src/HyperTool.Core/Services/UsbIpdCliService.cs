@@ -1057,6 +1057,12 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 
     private static async Task EnsureReadyAsync(CancellationToken cancellationToken)
     {
+        if (IsSystemShutdownInProgress())
+        {
+            Log.Information("Skipping usbipd readiness check because system shutdown is in progress.");
+            return;
+        }
+
         await EnsureReadyGate.WaitAsync(cancellationToken);
         try
         {
@@ -1088,9 +1094,21 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 
     private static async Task EnsureUsbipdServiceRunningAsync(CancellationToken cancellationToken)
     {
+        if (IsSystemShutdownInProgress())
+        {
+            Log.Information("Skipping usbipd service state check because system shutdown is in progress.");
+            return;
+        }
+
         var queryResult = await RunUtilityAsync("sc", "query usbipd", cancellationToken);
         if (queryResult.ExitCode != 0)
         {
+            if (IsSystemShutdownInProgress())
+            {
+                Log.Information("Skipping usbipd service startup because system shutdown is in progress.");
+                return;
+            }
+
             throw new InvalidOperationException("usbipd-Dienst ist nicht verfügbar.");
         }
 
@@ -1126,6 +1144,12 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
                 throw new InvalidOperationException("usbipd-Dienst konnte nicht gestartet werden.");
             }
         }
+    }
+
+    private static bool IsSystemShutdownInProgress()
+    {
+        return Environment.HasShutdownStarted
+               || AppDomain.CurrentDomain.IsFinalizingForUnload();
     }
 
     private static async Task<CommandResult> RunUtilityAsync(string fileName, string arguments, CancellationToken cancellationToken)

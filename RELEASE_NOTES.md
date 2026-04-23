@@ -1,5 +1,29 @@
 # HyperTool Release Notes
 
+## v2.6.1
+
+### Highlights
+
+- VMConnect-Hostnamen werden beim Start zuverlässig auf den aktuellen Rechnernamen des Hosts aktualisiert.
+- Tray-Doppelklick zum Ein-/Ausblenden wurde für Host und Guest stabilisiert, insbesondere bei minimiertem Autostart.
+- VMConnect-Verbindungsfehler durch den ungültigen Parameter `/fullscreen` wurden beseitigt.
+
+### Verbessert
+
+- Konfigurationsnormalisierung aktualisiert `VmConnectComputerName` jetzt konsequent auf `Environment.MachineName`.
+- Host- und Guest-Tray-Callbacks (`Show`/`Hide`/`IsVisible`) werden dispatcher-sicher auf dem UI-Thread ausgeführt.
+- USB-Shutdown-Cleanup berücksichtigt den Windows-Shutdown-Zustand robuster und vermeidet unnötige Service-Abfragen in der Endphase.
+
+### Behoben
+
+- Nach Umbenennung des Host-Rechners blieb in einzelnen Konfigurationen noch ein veralteter VMConnect-Hostname stehen.
+- Bei minimiertem Start reagierte der Doppelklick auf das Tray-Icon in Host/Guest teils nicht zuverlässig auf Einblenden.
+- `vmconnect.exe` meldete beim Verbindungsaufbau „Die Option '/fullscreen' ist unbekannt“.
+
+### Doku
+
+- README auf `v2.6.1` aktualisiert (Release-Stand und Fix-Übersicht).
+
 ## v2.6.0
 
 ### Highlights

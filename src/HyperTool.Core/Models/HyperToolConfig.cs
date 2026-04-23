@@ -14,6 +14,8 @@ public sealed class HyperToolConfig
 
     public string VmConnectComputerName { get; set; } = Environment.MachineName;
 
+    public string LastKnownHostComputerName { get; set; } = Environment.MachineName;
+
     public HnsSettings Hns { get; set; } = new();
 
     public UiSettings Ui { get; set; } = new();
