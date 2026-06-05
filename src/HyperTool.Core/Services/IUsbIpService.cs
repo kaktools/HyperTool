@@ -4,6 +4,8 @@ namespace HyperTool.Services;
 
 public interface IUsbIpService
 {
+    void SetShutdownCleanupMode(bool enabled);
+
     Task<bool> IsUsbClientAvailableAsync(CancellationToken cancellationToken);
 
     Task<IReadOnlyList<UsbIpDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken);

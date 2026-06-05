@@ -157,6 +157,7 @@ internal sealed class GuestMainWindow : Window
     private readonly StackPanel _guestVmNetworkAdapterCardsPanel = new() { Spacing = 10 };
     private IReadOnlyList<HostVmNetworkAdapterInfo> _guestVmNetworkAdapters = [];
     private IReadOnlyList<HostVmSwitchInfo> _guestVmSwitches = [];
+    private readonly GuestVmNetworkOverviewResult? _initialGuestVmNetworkOverview;
     private bool _isRefreshingGuestVmNetwork;
     private bool _isApplyingGuestVmNetworkSwitch;
     private readonly ComboBox _themeCombo = new();
@@ -311,7 +312,8 @@ internal sealed class GuestMainWindow : Window
         Func<Task<GuestVmNetworkOverviewResult>> fetchGuestVmNetworkOverviewAsync,
         Func<string, string, Task<GuestVmNetworkSwitchCommandResult>> switchGuestVmNetworkAsync,
         Func<Task> refreshAfterGuestVmNetworkSwitchAsync,
-        bool isUsbClientAvailable)
+        bool isUsbClientAvailable,
+        GuestVmNetworkOverviewResult? initialGuestVmNetworkOverview)
     {
         _config = config;
         _refreshUsbDevicesAsync = refreshUsbDevicesAsync;
@@ -328,6 +330,7 @@ internal sealed class GuestMainWindow : Window
         _switchGuestVmNetworkAsync = switchGuestVmNetworkAsync;
         _refreshAfterGuestVmNetworkSwitchAsync = refreshAfterGuestVmNetworkSwitchAsync;
         _isUsbClientAvailable = isUsbClientAvailable;
+        _initialGuestVmNetworkOverview = initialGuestVmNetworkOverview;
 
         Title = "HyperTool Guest";
         ExtendsContentIntoTitleBar = false;
@@ -352,7 +355,30 @@ internal sealed class GuestMainWindow : Window
 
         _isUiInitialized = true;
 
-        DispatcherQueue.TryEnqueue(() => _ = ShowUsbResetMigrationInfoIfPendingAsync());
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _ = ShowUsbResetMigrationInfoIfPendingAsync();
+            _ = WarmNetworkPageOnStartupAsync();
+        });
+    }
+
+    private async Task WarmNetworkPageOnStartupAsync()
+    {
+        try
+        {
+            // Let initial layout settle first, then trigger lazy network page creation.
+            // BuildNetworkPage starts a background refresh against the host immediately.
+            await Task.Delay(250);
+
+            if (_networkPage is null)
+            {
+                _networkPage = BuildNetworkPage();
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Network startup warm-up failed: {ex.Message}");
+        }
     }
 
     public string CurrentTheme => GuestConfigService.NormalizeTheme((_themeCombo.SelectedItem as string) ?? _config.Ui.Theme);
@@ -3168,11 +3194,17 @@ internal sealed class GuestMainWindow : Window
         Grid.SetRow(adapterCardHost, 1);
         root.Children.Add(adapterCardHost);
 
-        _ = RefreshGuestVmNetworkOverviewAsync();
+        if (HasUsableGuestVmNetworkCache(_initialGuestVmNetworkOverview))
+        {
+            ApplyGuestVmNetworkOverviewToUi(_initialGuestVmNetworkOverview!);
+            _guestVmNetworkStatusText.Text = BuildGuestVmNetworkSummaryText(_initialGuestVmNetworkOverview!, includeCacheHint: true);
+        }
+
+        _ = RefreshGuestVmNetworkOverviewAsync(preferCachedUiState: true);
         return root;
     }
 
-    private async Task RefreshGuestVmNetworkOverviewAsync()
+    private async Task RefreshGuestVmNetworkOverviewAsync(bool preferCachedUiState = false)
     {
         if (_isRefreshingGuestVmNetwork)
         {
@@ -3183,7 +3215,15 @@ internal sealed class GuestMainWindow : Window
         try
         {
             UpdateGuestVmNetworkControlsState();
-            _guestVmNetworkStatusText.Text = "Lade Netzwerkdaten vom Host ...";
+
+            if (!preferCachedUiState || (_guestVmNetworkAdapters.Count == 0 && _guestVmSwitches.Count == 0))
+            {
+                _guestVmNetworkStatusText.Text = "Lade Netzwerkdaten vom Host ...";
+            }
+            else
+            {
+                _guestVmNetworkStatusText.Text = "Netzwerkdaten aus Cache angezeigt · aktualisiere vom Host ...";
+            }
 
             var overview = await _fetchGuestVmNetworkOverviewAsync();
             ApplyGuestVmNetworkOverviewToUi(overview);
@@ -3226,6 +3266,62 @@ internal sealed class GuestMainWindow : Window
         }
 
         await RefreshGuestVmNetworkOverviewAsync();
+    }
+
+    public void ApplyGuestVmNetworkSwitchFromExternal(string adapterName, string switchName)
+    {
+        if (DispatcherQueue is { } queue && !queue.HasThreadAccess)
+        {
+            _ = queue.TryEnqueue(() => ApplyGuestVmNetworkSwitchFromExternal(adapterName, switchName));
+            return;
+        }
+
+        var normalizedAdapterName = (adapterName ?? string.Empty).Trim();
+        var normalizedSwitchName = (switchName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedAdapterName) || string.IsNullOrWhiteSpace(normalizedSwitchName))
+        {
+            return;
+        }
+
+        var currentAdapter = _guestVmNetworkAdapters.FirstOrDefault(item =>
+            string.Equals((item.Name ?? string.Empty).Trim(), normalizedAdapterName, StringComparison.OrdinalIgnoreCase));
+        if (currentAdapter is null)
+        {
+            return;
+        }
+
+        currentAdapter.SwitchName = normalizedSwitchName;
+        RebuildGuestVmNetworkAdapterCards();
+    }
+
+    private static bool HasUsableGuestVmNetworkCache(GuestVmNetworkOverviewResult? overview)
+    {
+        if (overview is null)
+        {
+            return false;
+        }
+
+        var adapters = overview.Adapters ?? [];
+        var switches = overview.Switches ?? [];
+        return adapters.Count > 0 || switches.Count > 0;
+    }
+
+    private static string BuildGuestVmNetworkSummaryText(GuestVmNetworkOverviewResult overview, bool includeCacheHint)
+    {
+        var adapters = overview.Adapters ?? [];
+        var switches = overview.Switches ?? [];
+
+        if (!overview.Success)
+        {
+            var message = string.IsNullOrWhiteSpace(overview.Message)
+                ? "Netzwerkdaten konnten nicht geladen werden."
+                : overview.Message;
+            return $"VM: nicht auflösbar · {message}";
+        }
+
+        var vmName = string.IsNullOrWhiteSpace(overview.VmName) ? "-" : overview.VmName;
+        var summary = $"VM: {vmName} · {adapters.Count} Adapter · {switches.Count} Switches";
+        return includeCacheHint ? $"{summary} · Cache" : summary;
     }
 
     private void ApplyGuestVmNetworkOverviewToUi(GuestVmNetworkOverviewResult overview)
@@ -3476,7 +3572,14 @@ internal sealed class GuestMainWindow : Window
                 ? ""
                 : $" auf VM '{result.VmName}'";
 
-            _guestVmNetworkStatusText.Text = $"Adapter '{adapterName}' wurde auf '{switchName}' umgestellt{vmText}.";
+            if (currentAdapter is not null)
+            {
+                currentAdapter.SwitchName = switchName;
+            }
+
+            RebuildGuestVmNetworkAdapterCards();
+
+            _guestVmNetworkStatusText.Text = $"Adapter '{adapterName}' wurde auf '{switchName}' umgestellt{vmText} · aktualisiere im Hintergrund ...";
             AppendNotification($"[Info] Netzwerk-Switch erfolgreich geändert{vmText}.");
 
             _ = Task.Run(async () =>
@@ -3490,7 +3593,16 @@ internal sealed class GuestMainWindow : Window
                 }
             });
 
-            await RefreshGuestVmNetworkOverviewAsync();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await RefreshGuestVmNetworkOverviewAsync(preferCachedUiState: true);
+                }
+                catch
+                {
+                }
+            });
         }
         catch (Exception ex)
         {

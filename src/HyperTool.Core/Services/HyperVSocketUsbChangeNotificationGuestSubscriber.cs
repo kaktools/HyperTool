@@ -1,5 +1,7 @@
+using HyperTool.Models;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 
 namespace HyperTool.Services;
 
@@ -11,6 +13,11 @@ namespace HyperTool.Services;
 /// </summary>
 public sealed class HyperVSocketUsbChangeNotificationGuestSubscriber
 {
+    private static readonly JsonSerializerOptions PayloadJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
     private readonly Guid _serviceId;
 
     public HyperVSocketUsbChangeNotificationGuestSubscriber(Guid? serviceId = null)
@@ -20,11 +27,15 @@ public sealed class HyperVSocketUsbChangeNotificationGuestSubscriber
 
     /// <summary>
     /// Connects to the host notification service and blocks until the connection drops
-    /// or <paramref name="cancellationToken"/> is cancelled.  For each
+    /// or <paramref name="cancellationToken"/> is cancelled. For each
     /// <c>usb-share-changed</c> event line received, <paramref name="onUsbShareChanged"/>
     /// is invoked synchronously before resuming the read loop.
+    /// <paramref name="onConnected"/> is invoked once right after the socket connects.
     /// </summary>
-    public async Task SubscribeAsync(Action onUsbShareChanged, CancellationToken cancellationToken)
+    public async Task SubscribeAsync(
+        Action<UsbChangeNotificationEnvelope> onUsbShareChanged,
+        CancellationToken cancellationToken,
+        Action? onConnected = null)
     {
         using var socket = new Socket((AddressFamily)34, SocketType.Stream, (ProtocolType)1);
 
@@ -33,6 +44,7 @@ public sealed class HyperVSocketUsbChangeNotificationGuestSubscriber
         // Synchronous connect — consistent with other HyperV Socket guest clients.
         var endpoint = new HyperVSocketEndPoint(HyperVSocketUsbTunnelDefaults.VmIdParent, _serviceId);
         socket.Connect(endpoint);
+        onConnected?.Invoke();
 
         await using var stream = new NetworkStream(socket, ownsSocket: true);
         using var reader = new StreamReader(
@@ -50,10 +62,52 @@ public sealed class HyperVSocketUsbChangeNotificationGuestSubscriber
                 break; // EOF — host closed the connection.
             }
 
-            if (line.Contains("usb-share-changed", StringComparison.OrdinalIgnoreCase))
+            if (TryParseUsbShareChangedEvent(line, out var notification))
             {
-                onUsbShareChanged();
+                onUsbShareChanged(notification);
             }
         }
+    }
+
+    private static bool TryParseUsbShareChangedEvent(string line, out UsbChangeNotificationEnvelope notification)
+    {
+        notification = new UsbChangeNotificationEnvelope();
+
+        try
+        {
+            var envelope = JsonSerializer.Deserialize<UsbChangeNotificationEnvelope>(line, PayloadJsonOptions);
+            if (envelope?.Event is not null
+                && envelope.Event.Equals("usb-share-changed", StringComparison.OrdinalIgnoreCase))
+            {
+                notification = new UsbChangeNotificationEnvelope
+                {
+                    Event = envelope.Event,
+                    EventId = (envelope.EventId ?? string.Empty).Trim(),
+                    HasCatalogSnapshot = envelope.HasCatalogSnapshot,
+                    HostDevices = (envelope.HostDevices ?? [])
+                        .Where(device => device is not null)
+                        .ToList()
+                };
+                return true;
+            }
+        }
+        catch
+        {
+            // Fall back to legacy payload detection.
+        }
+
+        if (line.Contains("usb-share-changed", StringComparison.OrdinalIgnoreCase))
+        {
+            notification = new UsbChangeNotificationEnvelope
+            {
+                Event = "usb-share-changed",
+                EventId = string.Empty,
+                HasCatalogSnapshot = false,
+                HostDevices = []
+            };
+            return true;
+        }
+
+        return false;
     }
 }

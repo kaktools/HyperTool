@@ -10,6 +10,12 @@ namespace HyperTool.Guest;
 
 internal sealed class GuestConfig
 {
+    public int ConfigSchemaVersion { get; set; } = 2;
+
+    public string LastSeenGuestToolVersion { get; set; } = string.Empty;
+
+    public string LastSeenGuestWhatsNewNoticeVersion { get; set; } = string.Empty;
+
     public bool Enabled { get; set; } = true;
 
     public string SharePath { get; set; } = "\\\\HOST\\HyperToolShare";
@@ -33,7 +39,10 @@ internal sealed class GuestConfig
     public GuestSharedFolderSettings SharedFolders { get; set; } = new();
 
     public GuestFileServiceSettings FileService { get; set; } = new();
-        public GuestMonitoringSettings Monitoring { get; set; } = new();
+
+    public GuestMonitoringSettings Monitoring { get; set; } = new();
+
+    public GuestNetworkSettings Network { get; set; } = new();
 
     public GuestUiSettings Ui { get; set; } = new();
 }
@@ -54,9 +63,18 @@ internal sealed class GuestFileServiceSettings
     public bool PreferHyperVSocket { get; set; } = true;
 }
 
+internal sealed class GuestNetworkSettings
+{
+    public bool Enabled { get; set; } = true;
+}
+
 internal sealed class GuestUsbSettings
 {
     public bool Enabled { get; set; } = true;
+
+    public bool EnableRefreshRequestMerging { get; set; } = false;
+
+    public bool BackgroundCommunicationEnabled { get; set; } = false;
 
     public bool DisconnectOnExit { get; set; } = true;
 
@@ -72,11 +90,14 @@ internal sealed class GuestUsbSettings
 
     public List<string> AutoConnectDeviceKeys { get; set; } = [];
 
-    public bool UsbConfigResetMigrationApplied { get; set; }
+    [JsonIgnore]
+    public bool UsbConfigResetMigrationApplied { get; set; } = true;
 
+    [JsonIgnore]
     public bool UsbConfigResetMigrationInfoPending { get; set; }
 
-    public bool HyperVOnlyCleanupMigrationApplied { get; set; }
+    [JsonIgnore]
+    public bool HyperVOnlyCleanupMigrationApplied { get; set; } = true;
 }
 
 internal sealed class GuestSharedFolderSettings
@@ -215,6 +236,7 @@ internal sealed class GuestHandshakeSettings
 
 internal static class GuestConfigService
 {
+    private const int CurrentConfigSchemaVersion = 2;
     private const string ProtectedPasswordPrefix = "dpapi:";
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -281,11 +303,7 @@ internal static class GuestConfigService
         if (!File.Exists(configPath))
         {
             var config = new GuestConfig();
-            // Fresh installs should not trigger the legacy USB reset migration popup.
-            config.Usb ??= new GuestUsbSettings();
-            config.Usb.UsbConfigResetMigrationApplied = true;
-            config.Usb.UsbConfigResetMigrationInfoPending = false;
-            config.Usb.HyperVOnlyCleanupMigrationApplied = true;
+            Normalize(config);
             Write(configPath, config);
             created = true;
             return config;
@@ -296,11 +314,16 @@ internal static class GuestConfigService
             var raw = File.ReadAllText(configPath);
             var loaded = JsonSerializer.Deserialize<GuestConfig>(raw, SerializerOptions)
                 ?? throw new JsonException("Guest-Konfiguration konnte nicht deserialisiert werden.");
-            var resetMigrationWasApplied = loaded.Usb?.UsbConfigResetMigrationApplied == true;
-            var hyperVOnlyCleanupWasApplied = loaded.Usb?.HyperVOnlyCleanupMigrationApplied == true;
+
+            var schemaVersionBeforeNormalize = loaded.ConfigSchemaVersion;
+            var refreshMergingBeforeNormalize = loaded.Usb?.EnableRefreshRequestMerging == true;
+            var backgroundCommunicationBeforeNormalize = loaded.Usb?.BackgroundCommunicationEnabled == true;
+
             Normalize(loaded);
-            if ((!resetMigrationWasApplied && loaded.Usb?.UsbConfigResetMigrationApplied == true)
-                || (!hyperVOnlyCleanupWasApplied && loaded.Usb?.HyperVOnlyCleanupMigrationApplied == true))
+
+            if (schemaVersionBeforeNormalize != loaded.ConfigSchemaVersion
+                || refreshMergingBeforeNormalize
+                || backgroundCommunicationBeforeNormalize)
             {
                 Write(configPath, loaded);
             }
@@ -312,11 +335,6 @@ internal static class GuestConfigService
         {
             var backupPath = TryBackupBrokenConfig(configPath);
             var fallback = new GuestConfig();
-            fallback.Usb ??= new GuestUsbSettings();
-            fallback.Usb.UsbConfigResetMigrationApplied = true;
-            fallback.Usb.UsbConfigResetMigrationInfoPending = false;
-            fallback.Usb.HyperVOnlyCleanupMigrationApplied = true;
-
             Normalize(fallback);
 
             try
@@ -385,6 +403,11 @@ internal static class GuestConfigService
 
     private static void Normalize(GuestConfig config)
     {
+        if (config.ConfigSchemaVersion != CurrentConfigSchemaVersion)
+        {
+            config.ConfigSchemaVersion = CurrentConfigSchemaVersion;
+        }
+
         config.SharePath = (config.SharePath ?? string.Empty).Trim();
         config.DriveLetter = NormalizeDriveLetter(config.DriveLetter);
         config.PollIntervalSeconds = Math.Clamp(config.PollIntervalSeconds, 5, 3600);
@@ -414,6 +437,9 @@ internal static class GuestConfigService
 
         config.Usb ??= new GuestUsbSettings();
         config.Usb.UseHyperVSocket = true;
+        // Enforced safety defaults for update installations.
+        config.Usb.EnableRefreshRequestMerging = false;
+        config.Usb.BackgroundCommunicationEnabled = false;
         config.Usb.HostAddress = (config.Usb.HostAddress ?? string.Empty).Trim();
         config.Usb.HostName = (config.Usb.HostName ?? string.Empty).Trim();
         config.Usb.HyperVSocketServiceId = string.IsNullOrWhiteSpace(config.Usb.HyperVSocketServiceId)
@@ -469,8 +495,10 @@ internal static class GuestConfigService
 
         config.FileService ??= new GuestFileServiceSettings();
         config.FileService.MappingMode = NormalizeMappingMode(config.FileService.MappingMode);
-            config.Monitoring ??= new GuestMonitoringSettings();
-            config.Monitoring.MonitorIntervalMs = NormalizeMonitorIntervalMs(config.Monitoring.MonitorIntervalMs);
+        config.Monitoring ??= new GuestMonitoringSettings();
+        config.Monitoring.MonitorIntervalMs = NormalizeMonitorIntervalMs(config.Monitoring.MonitorIntervalMs);
+
+        config.Network ??= new GuestNetworkSettings();
 
         config.Ui ??= new GuestUiSettings();
         config.Ui.Theme = NormalizeTheme(config.Ui.Theme);

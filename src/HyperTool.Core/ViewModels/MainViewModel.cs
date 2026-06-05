@@ -10,9 +10,11 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Text.Json;
 
 namespace HyperTool.ViewModels;
 
@@ -28,6 +30,7 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan StaleUsbAttachFinalRecheckDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GuestAckChannelHealthyWindow = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan VmOffDetachRecentGuestAckGracePeriod = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan VmOffDetachVmWideFreshActivityGracePeriod = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan VmOffDetachTransientSuppressionAfterReload = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan GuestDisconnectDetachTransientSuppressionAfterReload = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan GuestNetworkDiagnosticsFreshness = TimeSpan.FromSeconds(20);
@@ -37,11 +40,19 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan UsbDisconnectRecoveryProbeInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan UsbDisconnectRecoveryFreshnessWindow = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan VmOffDetachSuppressionLogInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan VmConnectOpenRetryPollInterval = TimeSpan.FromMilliseconds(900);
+    private const int VmConnectOpenRetryPollAttempts = 10;
+    private static readonly TimeSpan VmConnectLaunchSettleDelay = TimeSpan.FromMilliseconds(850);
     private static readonly TimeSpan GuestVmNetworkSwitchCacheTtl = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan GuestVmNetworkResolutionCacheTtl = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan VmNetworkAdapterRuntimeCacheTtl = TimeSpan.FromSeconds(45);
+    private const string StartupReadCacheSchemaVersion = "1";
+    private static readonly TimeSpan StartupReadCacheMaxAge = TimeSpan.FromHours(12);
     private const int UsbStaleExportHintEscalationCount = 2;
     private const int DefaultStaleUsbDetachRetryThreshold = 12;
     private const int LoopbackManagedUsbDetachRetryFloor = 20;
+    private const int RemovedSharedUsbUnshareThreshold = 30;
+    private static readonly TimeSpan RemovedSharedUsbUnshareMinAge = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan MonitorAgentTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan HostMonitorTimeout = TimeSpan.FromSeconds(8);
 
@@ -460,6 +471,7 @@ public partial class MainViewModel : ViewModelBase
     private bool _isHandlingMenuSelectionChange;
     private bool _suppressUsbAutoShareToggleHandling;
     private bool _suppressUsbGuestBlockToggleHandling;
+    private static readonly TimeSpan UsbTrayRefreshMaintenanceInterval = TimeSpan.FromSeconds(30);
     private readonly SemaphoreSlim _usbTrayRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _vmStatusRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _guestVmNetworkCommandGate = new(1, 1);
@@ -467,6 +479,8 @@ public partial class MainViewModel : ViewModelBase
     private readonly Dictionary<string, UsbDeviceMetadataEntry> _usbDeviceMetadataByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, UsbDeviceMetadataEntry> _usbMetadataBusAliasByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _usbMetadataBusAliasExpiresUtc = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _lastTrayUsbMaintenanceRefreshUtc = DateTimeOffset.MinValue;
+    private IReadOnlyList<UsbIpDeviceInfo> _lastFullUsbInventorySnapshot = [];
     private bool _usbHardwareIdentityMigrationCompleted;
     private bool _usbConfigResetMigrationApplied;
     private bool _usbResetMigrationInfoShown;
@@ -477,6 +491,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly Dictionary<string, DateTimeOffset> _usbVmNotRunningSinceUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _usbVmOffDetachManualRequiredBusIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc, int Count)> _usbStaleExportHintStateByBusId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc, int Count)> _usbRemovedSharedDeviceStateByKey = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _resourceMonitorSync = new();
     private readonly Dictionary<string, VmResourceMonitorRuntimeState> _vmMonitorStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<double> _hostCpuHistory = new();
@@ -507,6 +522,9 @@ public partial class MainViewModel : ViewModelBase
     private string _cachedGuestVmResolutionGuestComputerName = string.Empty;
     private DateTimeOffset _cachedGuestVmResolutionAtUtc = DateTimeOffset.MinValue;
     private GuestVmNetworkCommandVmResolution? _cachedGuestVmResolution;
+    private readonly object _startupReadCacheSync = new();
+    private readonly Dictionary<string, (DateTimeOffset CachedAtUtc, IReadOnlyList<HyperVVmNetworkAdapterInfo> Adapters)> _vmNetworkAdaptersRuntimeCacheByVmName = new(StringComparer.OrdinalIgnoreCase);
+    private bool _startupReadCacheApplied;
 
     private sealed class VmResourceMonitorRuntimeState
     {
@@ -707,15 +725,15 @@ public partial class MainViewModel : ViewModelBase
         ExportSelectedVmCommand = new AsyncRelayCommand(ExportSelectedVmAsync, () => !IsBusy && SelectedVmForConfig is not null);
         ImportVmCommand = new AsyncRelayCommand(ImportVmAsync, () => !IsBusy);
 
-        LoadSwitchesCommand = new AsyncRelayCommand(RefreshSwitchesAsync, () => !IsBusy);
-        RefreshSwitchesCommand = new AsyncRelayCommand(RefreshSwitchesAsync, () => !IsBusy);
+        LoadSwitchesCommand = new AsyncRelayCommand(() => RefreshSwitchesAsync(), () => !IsBusy);
+        RefreshSwitchesCommand = new AsyncRelayCommand(() => RefreshSwitchesAsync(), () => !IsBusy);
         ConnectSelectedSwitchCommand = new AsyncRelayCommand(ConnectSelectedSwitchAsync, () => !IsBusy && SelectedVm is not null && SelectedVmNetworkAdapter is not null && SelectedSwitch is not null && AreSwitchesLoaded);
         DisconnectSwitchCommand = new AsyncRelayCommand(DisconnectSwitchAsync, () => !IsBusy && SelectedVm is not null && SelectedVmNetworkAdapter is not null);
         ConnectAdapterToSwitchByKeyCommand = new AsyncRelayCommand<string>(ConnectAdapterToSwitchByKeyAsync, _ => !IsBusy && SelectedVm is not null && AreSwitchesLoaded);
         DisconnectAdapterByNameCommand = new AsyncRelayCommand<string>(DisconnectAdapterByNameAsync, _ => !IsBusy && SelectedVm is not null);
         RefreshVmStatusCommand = new AsyncRelayCommand(RefreshRuntimeDataAsync, () => !IsBusy);
 
-        LoadCheckpointsCommand = new AsyncRelayCommand(LoadCheckpointsAsync, () => SelectedVm is not null);
+        LoadCheckpointsCommand = new AsyncRelayCommand(() => LoadCheckpointsAsync(), () => SelectedVm is not null);
         ApplyCheckpointCommand = new AsyncRelayCommand(ApplyCheckpointAsync, () => !IsBusy && SelectedVm is not null && SelectedCheckpoint is not null);
         DeleteCheckpointCommand = new AsyncRelayCommand(DeleteCheckpointAsync, () => !IsBusy && SelectedVm is not null && SelectedCheckpoint is not null);
 
@@ -930,6 +948,7 @@ public partial class MainViewModel : ViewModelBase
         if (!value)
         {
             UsbDevices.Clear();
+            _lastFullUsbInventorySnapshot = [];
             SelectedUsbDevice = null;
             UsbStatusText = "USB Share ist global im Host deaktiviert.";
             UsbRuntimeHintText = string.Empty;
@@ -1035,13 +1054,19 @@ public partial class MainViewModel : ViewModelBase
         LastSelectedVmName = value.Name;
         SelectedVmState = string.IsNullOrWhiteSpace(value.RuntimeState) ? "Unbekannt" : value.RuntimeState;
         SelectedVmCurrentSwitch = NormalizeSwitchDisplayName(value.RuntimeSwitchName);
+        AvailableCheckpoints.Clear();
+        AvailableCheckpointTree.Clear();
+        SelectedCheckpoint = null;
+        SelectedCheckpointNode = null;
+
+        var appliedCheckpointCache = TryApplyCheckpointCacheForVm(value.Name);
         SyncSelectedSwitchWithCurrentVm(showNotificationOnMissingSwitch: false);
         _ = PersistSelectedVmAsync(value.Name);
 
         _ = EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
 
         _ = RefreshSelectedVmStatusAfterSelectionAsync(value.Name);
-        _ = LoadCheckpointsAsync();
+        _ = LoadCheckpointsAsync(showSuccessNotification: !appliedCheckpointCache);
     }
 
     private async Task RefreshSelectedVmStatusAfterSelectionAsync(string selectedVmName)
@@ -1391,18 +1416,17 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task InitializeAsync()
     {
-        await RefreshUsbRuntimeAvailabilityAsync();
-        await LoadVmsFromHyperVWithRetryAsync();
-        await RefreshSwitchesAsync();
-        await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
-        await RefreshHostNetworkProfileAsync();
-        await RefreshVmStatusAsync();
-        await LoadCheckpointsAsync();
+        TryApplyStartupReadCache();
+
+        _ = RefreshStartupDataInBackgroundAsync();
+        _ = RefreshUsbRuntimeAvailabilityAsync();
 
         if (UpdateCheckOnStartup)
         {
-            await CheckForUpdatesAsync(isStartupCheck: true);
+            _ = CheckForUpdatesAsync(isStartupCheck: true);
         }
+
+        await Task.CompletedTask;
     }
 
     public async Task RefreshUsbRuntimeAvailabilityAsync()
@@ -1431,7 +1455,152 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
-    private async Task LoadVmsFromHyperVWithRetryAsync()
+    private string GetStartupReadCachePath()
+    {
+        var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return Path.Combine(appDataPath, "HyperTool", "cache", "host-startup-read-cache.json");
+    }
+
+    private void TryApplyStartupReadCache()
+    {
+        if (!TryReadStartupReadCache(out var cache))
+        {
+            return;
+        }
+
+        if (DateTimeOffset.UtcNow - cache.CapturedAtUtc > StartupReadCacheMaxAge)
+        {
+            return;
+        }
+
+        if (cache.Vms.Count > 0)
+        {
+            ApplyRuntimeVmSnapshot(cache.Vms, showSuccessNotification: false);
+            _startupReadCacheApplied = true;
+        }
+
+        if (cache.Switches.Count > 0)
+        {
+            AvailableSwitches.Clear();
+            foreach (var vmSwitch in cache.Switches.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                AvailableSwitches.Add(vmSwitch);
+            }
+
+            AreSwitchesLoaded = true;
+            SyncSelectedSwitchWithCurrentVm(showNotificationOnMissingSwitch: false);
+            NotifyTrayStateChanged();
+            _startupReadCacheApplied = true;
+        }
+
+        if (_startupReadCacheApplied)
+        {
+            AddNotification("Startup-Cache geladen. Live-Refresh läuft im Hintergrund.", "Info");
+        }
+    }
+
+    private async Task RefreshStartupDataInBackgroundAsync()
+    {
+        try
+        {
+            await LoadVmsFromHyperVWithRetryAsync(showSuccessNotification: !_startupReadCacheApplied, useBusyIndicator: false, persistStartupCache: true);
+            await RefreshSwitchesAsync(showSuccessNotification: !_startupReadCacheApplied, useBusyIndicator: false, persistStartupCache: true);
+            await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+            await RefreshHostNetworkProfileAsync();
+            await WarmHostNetworkAdapterCacheAsync();
+            await RefreshVmStatusAsync();
+            await LoadCheckpointsAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Startup background refresh failed.");
+        }
+    }
+
+    private void ApplyRuntimeVmSnapshot(IReadOnlyList<HyperVVmInfo> vms, bool showSuccessNotification)
+    {
+        if (vms.Count == 0)
+        {
+            AvailableVms.Clear();
+            SelectedVm = null;
+            SelectedVmForConfig = null;
+            SelectedDefaultVmForConfig = null;
+            SelectedVmState = "Unbekannt";
+            SelectedVmCurrentSwitch = NotConnectedSwitchDisplay;
+            return;
+        }
+
+        var existingLabels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var existingTrayAdapters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var existingSessionEditPreference = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var configured in _configuredVmDefinitions.Values)
+        {
+            if (!string.IsNullOrWhiteSpace(configured.Name))
+            {
+                existingLabels[configured.Name] = configured.Label;
+                existingTrayAdapters[configured.Name] = configured.TrayAdapterName;
+                existingSessionEditPreference[configured.Name] = configured.OpenConsoleWithSessionEdit;
+            }
+        }
+
+        foreach (var vm in AvailableVms)
+        {
+            existingLabels[vm.Name] = vm.Label;
+            existingTrayAdapters[vm.Name] = vm.TrayAdapterName;
+            existingSessionEditPreference[vm.Name] = vm.OpenConsoleWithSessionEdit;
+        }
+
+        var orderedVms = vms.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToList();
+
+        AvailableVms.Clear();
+        foreach (var vmInfo in orderedVms)
+        {
+            var label = existingLabels.TryGetValue(vmInfo.Name, out var existingLabel) && !string.IsNullOrWhiteSpace(existingLabel)
+                ? existingLabel
+                : vmInfo.Name;
+
+            AvailableVms.Add(new VmDefinition
+            {
+                Name = vmInfo.Name,
+                VmId = vmInfo.VmId,
+                Label = label,
+                RuntimeState = vmInfo.State,
+                RuntimeSwitchName = NormalizeSwitchDisplayName(vmInfo.CurrentSwitchName),
+                HasMountedIso = vmInfo.HasMountedIso,
+                MountedIsoPath = vmInfo.MountedIsoPath,
+                TrayAdapterName = existingTrayAdapters.TryGetValue(vmInfo.Name, out var trayAdapterName) ? trayAdapterName : string.Empty,
+                OpenConsoleWithSessionEdit = existingSessionEditPreference.TryGetValue(vmInfo.Name, out var openWithSessionEdit) && openWithSessionEdit
+            });
+        }
+
+        if (AvailableVms.Count > 0 && !AvailableVms.Any(vm => string.Equals(vm.Name, DefaultVmName, StringComparison.OrdinalIgnoreCase)))
+        {
+            DefaultVmName = AvailableVms[0].Name;
+        }
+
+        var preferredVmName = !string.IsNullOrWhiteSpace(LastSelectedVmName)
+            ? LastSelectedVmName
+            : DefaultVmName;
+
+        SetSelectedVmInternal(AvailableVms.FirstOrDefault(vm => string.Equals(vm.Name, preferredVmName, StringComparison.OrdinalIgnoreCase))
+                              ?? AvailableVms.FirstOrDefault());
+        SelectedVmForConfig = SelectedVm;
+        SelectedDefaultVmForConfig = AvailableVms.FirstOrDefault(vm => string.Equals(vm.Name, DefaultVmName, StringComparison.OrdinalIgnoreCase))
+                                   ?? SelectedVm;
+        ReconcileVmMonitoringRuntimeStates();
+        NotifyTrayStateChanged();
+
+        if (showSuccessNotification)
+        {
+            AddNotification($"{AvailableVms.Count} Hyper-V VM(s) automatisch geladen.", "Info");
+        }
+    }
+
+    private async Task LoadVmsFromHyperVWithRetryAsync(bool showSuccessNotification = true, bool useBusyIndicator = true, bool persistStartupCache = true)
     {
         var retryDelays = new[] { 300, 700, 1500 };
         Exception? lastException = null;
@@ -1440,7 +1609,7 @@ public partial class MainViewModel : ViewModelBase
         {
             try
             {
-                await LoadVmsFromHyperVAsync();
+                await LoadVmsFromHyperVAsync(showSuccessNotification, useBusyIndicator, persistStartupCache);
 
                 if (StatusText.Equals("Keine Berechtigung", StringComparison.OrdinalIgnoreCase))
                 {
@@ -1479,85 +1648,26 @@ public partial class MainViewModel : ViewModelBase
         StatusText = "Keine Hyper-V VMs gefunden";
     }
 
-    private async Task LoadVmsFromHyperVAsync()
+    private async Task LoadVmsFromHyperVAsync(bool showSuccessNotification = true, bool useBusyIndicator = true, bool persistStartupCache = true)
     {
-        await ExecuteBusyActionAsync("Hyper-V VMs werden geladen...", async token =>
+        async Task loadAction(CancellationToken token)
         {
             var vms = await _hyperVService.GetVmsAsync(token);
-            if (vms.Count == 0)
+            ApplyRuntimeVmSnapshot(vms, showSuccessNotification);
+            if (persistStartupCache)
             {
-                AvailableVms.Clear();
-                SelectedVm = null;
-                SelectedVmForConfig = null;
-                SelectedDefaultVmForConfig = null;
-                SelectedVmState = "Unbekannt";
-                SelectedVmCurrentSwitch = NotConnectedSwitchDisplay;
-                return;
+                UpdateStartupReadCache(vms: vms);
             }
+        }
 
-            var existingLabels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var existingTrayAdapters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var existingSessionEditPreference = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var configured in _configuredVmDefinitions.Values)
-            {
-                if (!string.IsNullOrWhiteSpace(configured.Name))
-                {
-                    existingLabels[configured.Name] = configured.Label;
-                    existingTrayAdapters[configured.Name] = configured.TrayAdapterName;
-                    existingSessionEditPreference[configured.Name] = configured.OpenConsoleWithSessionEdit;
-                }
-            }
-
-            foreach (var vm in AvailableVms)
-            {
-                existingLabels[vm.Name] = vm.Label;
-                existingTrayAdapters[vm.Name] = vm.TrayAdapterName;
-                existingSessionEditPreference[vm.Name] = vm.OpenConsoleWithSessionEdit;
-            }
-
-            var orderedVms = vms.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToList();
-
-            AvailableVms.Clear();
-            foreach (var vmInfo in orderedVms)
-            {
-                var label = existingLabels.TryGetValue(vmInfo.Name, out var existingLabel) && !string.IsNullOrWhiteSpace(existingLabel)
-                    ? existingLabel
-                    : vmInfo.Name;
-
-                AvailableVms.Add(new VmDefinition
-                {
-                    Name = vmInfo.Name,
-                    VmId = vmInfo.VmId,
-                    Label = label,
-                    RuntimeState = vmInfo.State,
-                    RuntimeSwitchName = NormalizeSwitchDisplayName(vmInfo.CurrentSwitchName),
-                    HasMountedIso = vmInfo.HasMountedIso,
-                    MountedIsoPath = vmInfo.MountedIsoPath,
-                    TrayAdapterName = existingTrayAdapters.TryGetValue(vmInfo.Name, out var trayAdapterName) ? trayAdapterName : string.Empty,
-                    OpenConsoleWithSessionEdit = existingSessionEditPreference.TryGetValue(vmInfo.Name, out var openWithSessionEdit) && openWithSessionEdit
-                });
-            }
-
-            if (AvailableVms.Count > 0 && !AvailableVms.Any(vm => string.Equals(vm.Name, DefaultVmName, StringComparison.OrdinalIgnoreCase)))
-            {
-                DefaultVmName = AvailableVms[0].Name;
-            }
-
-            var preferredVmName = !string.IsNullOrWhiteSpace(LastSelectedVmName)
-                ? LastSelectedVmName
-                : DefaultVmName;
-
-            SetSelectedVmInternal(AvailableVms.FirstOrDefault(vm => string.Equals(vm.Name, preferredVmName, StringComparison.OrdinalIgnoreCase))
-                                  ?? AvailableVms.FirstOrDefault());
-            SelectedVmForConfig = SelectedVm;
-            SelectedDefaultVmForConfig = AvailableVms.FirstOrDefault(vm => string.Equals(vm.Name, DefaultVmName, StringComparison.OrdinalIgnoreCase))
-                                       ?? SelectedVm;
-            ReconcileVmMonitoringRuntimeStates();
-            NotifyTrayStateChanged();
-
-            AddNotification($"{AvailableVms.Count} Hyper-V VM(s) automatisch geladen.", "Info");
-        }, showNotificationOnErrorOnly: true);
+        if (useBusyIndicator)
+        {
+            await ExecuteBusyActionAsync("Hyper-V VMs werden geladen...", loadAction, showNotificationOnErrorOnly: true);
+        }
+        else
+        {
+            await loadAction(_lifetimeCancellation.Token);
+        }
     }
 
     private async Task StartSelectedVmAsync()
@@ -1569,7 +1679,7 @@ public partial class MainViewModel : ViewModelBase
 
             if (UiOpenConsoleAfterVmStart)
             {
-                await _hyperVService.OpenVmConnectAsync(SelectedVm.Name, VmConnectComputerName, ShouldOpenConsoleWithSessionEdit(SelectedVm.Name), token);
+                await OpenVmConsoleAfterStartAsync(SelectedVm.Name, token);
                 AddNotification($"Konsole für '{SelectedVm.Name}' geöffnet.", "Info");
             }
         });
@@ -1814,11 +1924,11 @@ public partial class MainViewModel : ViewModelBase
         await RefreshVmStatusAsync();
     }
 
-    private async Task RefreshSwitchesAsync()
+    private async Task RefreshSwitchesAsync(bool showSuccessNotification = true, bool useBusyIndicator = true, bool persistStartupCache = true)
     {
         AreSwitchesLoaded = false;
 
-        await ExecuteBusyActionAsync("Switches werden geladen...", async token =>
+        async Task refreshAction(CancellationToken token)
         {
             var switches = await _hyperVService.GetVmSwitchesAsync(token);
 
@@ -1832,8 +1942,25 @@ public partial class MainViewModel : ViewModelBase
             SyncSelectedSwitchWithCurrentVm(showNotificationOnMissingSwitch: true);
             NotifyTrayStateChanged();
 
-            AddNotification($"{AvailableSwitches.Count} Switch(es) geladen.", "Info");
-        });
+            if (showSuccessNotification)
+            {
+                AddNotification($"{AvailableSwitches.Count} Switch(es) geladen.", "Info");
+            }
+
+            if (persistStartupCache)
+            {
+                UpdateStartupReadCache(switches: switches);
+            }
+        }
+
+        if (useBusyIndicator)
+        {
+            await ExecuteBusyActionAsync("Switches werden geladen...", refreshAction);
+        }
+        else
+        {
+            await refreshAction(_lifetimeCancellation.Token);
+        }
     }
 
     private async Task RefreshRuntimeDataAsync()
@@ -1914,7 +2041,12 @@ public partial class MainViewModel : ViewModelBase
         await LoadUsbDevicesAsync(showNotification: true);
     }
 
-    private async Task LoadUsbDevicesAsync(bool showNotification, bool applyAutoShare = true, bool useBusyIndicator = true)
+    private async Task LoadUsbDevicesAsync(
+        bool showNotification,
+        bool applyAutoShare = true,
+        bool useBusyIndicator = true,
+        bool runVmOffAutoDetachSweep = false,
+        bool runInventoryCleanup = false)
     {
         if (!HostUsbSharingEnabled)
         {
@@ -1942,14 +2074,43 @@ public partial class MainViewModel : ViewModelBase
         async Task loadAction(CancellationToken token)
         {
             IReadOnlyList<UsbIpDeviceInfo> devices;
+            var keepPreviousUsbSnapshot = false;
             try
             {
                 devices = await _usbIpService.GetDevicesAsync(token);
 
-                var staleDetachedCount = await TryDetachStaleDisconnectedAttachmentsAsync(devices, token);
-                if (staleDetachedCount > 0)
+                var transientInventoryGap = devices.Count == 0
+                    && previousUsbSnapshot.Count > 0
+                    && previousUsbSnapshot.Any(device => device.IsAttached || device.IsShared);
+
+                if (transientInventoryGap)
                 {
-                    devices = await _usbIpService.GetDevicesAsync(token);
+                    Log.Warning(
+                        "Host USB inventory was temporarily empty while previously attached/shared devices existed. Running a short immediate recheck before accepting empty snapshot. PreviousCount={PreviousCount}",
+                        previousUsbSnapshot.Count);
+
+                    await Task.Delay(350, token);
+                    var recheckedDevices = await _usbIpService.GetDevicesAsync(token);
+                    if (recheckedDevices.Count == 0)
+                    {
+                        Log.Information(
+                            "Host USB inventory remains empty after recheck. Accepting empty snapshot to avoid delayed remove visibility. PreviousCount={PreviousCount}",
+                            previousUsbSnapshot.Count);
+                    }
+                    else
+                    {
+                        keepPreviousUsbSnapshot = true;
+                        devices = recheckedDevices;
+                    }
+                }
+
+                if (runInventoryCleanup)
+                {
+                    var staleDetachedCount = await TryDetachStaleDisconnectedAttachmentsAsync(devices, token);
+                    if (staleDetachedCount > 0)
+                    {
+                        devices = await _usbIpService.GetDevicesAsync(token);
+                    }
                 }
 
                 var canApplyAutoShareNow = applyAutoShare;
@@ -1996,7 +2157,9 @@ public partial class MainViewModel : ViewModelBase
                     }
                 }
 
-                if (UsbAutoDetachOnClientDisconnect)
+                // Keep routine refreshes non-destructive. VM-off stale detach sweep must only run
+                // in explicit maintenance contexts, never during normal host/tray refresh cycles.
+                if (runVmOffAutoDetachSweep && UsbAutoDetachOnClientDisconnect)
                 {
                     var detachedNoVmCount = await TryDetachLoopbackAttachedDevicesWhenNoVmRunningAsync(devices, token);
                     if (detachedNoVmCount > 0)
@@ -2012,11 +2175,20 @@ public partial class MainViewModel : ViewModelBase
                     _usbVmOffDetachManualRequiredBusIds.Clear();
                 }
 
-                await TryUnshareRemovedHostDevicesAsync(previousUsbSnapshot, devices, token);
+                if (runInventoryCleanup && !keepPreviousUsbSnapshot)
+                {
+                    await TryUnshareRemovedHostDevicesAsync(previousUsbSnapshot, devices, token);
+                }
+
+                _lastFullUsbInventorySnapshot = devices
+                    .Where(device => device is not null)
+                    .Select(CloneUsbDeviceForSnapshot)
+                    .ToList();
             }
             catch (Exception ex)
             {
                 UsbDevices.Clear();
+                _lastFullUsbInventorySnapshot = [];
                 SelectedUsbDevice = null;
                 UsbStatusText = BuildUsbUnavailableStatus(ex.Message);
 
@@ -2042,6 +2214,12 @@ public partial class MainViewModel : ViewModelBase
                 .ThenBy(device => device.BusId, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(device => device.Description, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+
+            var previousBySelectionKey = previousUsbSnapshot
+                .Where(device => device is not null)
+                .GroupBy(BuildUsbSelectionKey, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
             TryMigrateLegacyUsbIdentityKeys(preparedDevices);
             foreach (var device in preparedDevices)
             {
@@ -2066,6 +2244,28 @@ public partial class MainViewModel : ViewModelBase
                     && UsbGuestConnectionRegistry.TryGetFreshGuestComputerName(device, GuestAckChannelHealthyWindow, out var guestComputerName))
                 {
                     device.AttachedGuestComputerName = guestComputerName;
+                    continue;
+                }
+
+                if (device.IsAttached
+                    && string.IsNullOrWhiteSpace((device.AttachedGuestComputerName ?? string.Empty).Trim()))
+                {
+                    var selectionKey = BuildUsbSelectionKey(device);
+                    if (!string.IsNullOrWhiteSpace(selectionKey)
+                        && previousBySelectionKey.TryGetValue(selectionKey, out var previousDevice)
+                        && previousDevice.IsAttached
+                        && !string.IsNullOrWhiteSpace((previousDevice.AttachedGuestComputerName ?? string.Empty).Trim()))
+                    {
+                        device.AttachedGuestComputerName = (previousDevice.AttachedGuestComputerName ?? string.Empty).Trim();
+                        continue;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(device.BusId)
+                        && UsbGuestConnectionRegistry.TryGetGuestComputerName(device.BusId, out var knownGuestName)
+                        && !string.IsNullOrWhiteSpace(knownGuestName))
+                    {
+                        device.AttachedGuestComputerName = knownGuestName.Trim();
+                    }
                 }
             }
 
@@ -2076,6 +2276,22 @@ public partial class MainViewModel : ViewModelBase
                     for (var i = 0; i < preparedDevices.Count; i++)
                     {
                         UsbDevices[i] = preparedDevices[i];
+                    }
+                }
+                else if (UsbDeviceIdentitySetMatch(UsbDevices, preparedDevices))
+                {
+                    var preparedBySelectionKey = preparedDevices
+                        .GroupBy(BuildUsbSelectionKey, StringComparer.OrdinalIgnoreCase)
+                        .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+                    for (var i = 0; i < UsbDevices.Count; i++)
+                    {
+                        var selectionKey = BuildUsbSelectionKey(UsbDevices[i]);
+                        if (!string.IsNullOrWhiteSpace(selectionKey)
+                            && preparedBySelectionKey.TryGetValue(selectionKey, out var prepared))
+                        {
+                            UsbDevices[i] = prepared;
+                        }
                     }
                 }
                 else
@@ -2147,8 +2363,10 @@ public partial class MainViewModel : ViewModelBase
             }
         }
 
-        var removedSharedDevices = previousDevices
-            .Where(device => device is not null && (device.IsShared || device.IsAttached))
+        var removedSharedCandidates = previousDevices
+            // Only auto-unshare previously shared-but-not-attached entries.
+            // Attached entries can disappear transiently while guest attach state is settling.
+            .Where(device => device is not null && device.IsShared && !device.IsAttached)
             .Where(device =>
             {
                 var identityKeys = BuildUsbIdentityAliasKeys(device)
@@ -2169,6 +2387,52 @@ public partial class MainViewModel : ViewModelBase
                 return !identityKeys.Any(currentIdentityKeys.Contains);
             })
             .ToList();
+
+        if (removedSharedCandidates.Count == 0)
+        {
+            _usbRemovedSharedDeviceStateByKey.Clear();
+            return 0;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var activeCandidateKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var removedSharedDevices = new List<UsbIpDeviceInfo>();
+
+        foreach (var candidate in removedSharedCandidates)
+        {
+            var candidateKey = BuildUsbRemovedSharedCandidateKey(candidate);
+            if (string.IsNullOrWhiteSpace(candidateKey))
+            {
+                continue;
+            }
+
+            activeCandidateKeys.Add(candidateKey);
+
+            if (!_usbRemovedSharedDeviceStateByKey.TryGetValue(candidateKey, out var state))
+            {
+                state = (now, now, 0);
+            }
+
+            state = (state.FirstSeenUtc, now, state.Count + 1);
+            _usbRemovedSharedDeviceStateByKey[candidateKey] = state;
+
+            if (state.Count < RemovedSharedUsbUnshareThreshold)
+            {
+                continue;
+            }
+
+            if ((now - state.FirstSeenUtc) < RemovedSharedUsbUnshareMinAge)
+            {
+                continue;
+            }
+
+            removedSharedDevices.Add(candidate);
+        }
+
+        foreach (var staleKey in _usbRemovedSharedDeviceStateByKey.Keys.Except(activeCandidateKeys).ToList())
+        {
+            _usbRemovedSharedDeviceStateByKey.Remove(staleKey);
+        }
 
         if (removedSharedDevices.Count == 0)
         {
@@ -2217,6 +2481,27 @@ public partial class MainViewModel : ViewModelBase
         }
 
         return releasedCount;
+    }
+
+    private static string BuildUsbRemovedSharedCandidateKey(UsbIpDeviceInfo device)
+    {
+        var key = BuildUsbDeviceIdentityKey(device);
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            return key;
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
+        {
+            return "guid:" + device.PersistedGuid.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(device.BusId))
+        {
+            return "busid:" + device.BusId.Trim();
+        }
+
+        return string.Empty;
     }
 
     private async Task<int> TryDetachStaleDisconnectedAttachmentsAsync(IReadOnlyList<UsbIpDeviceInfo> devices, CancellationToken token)
@@ -2402,7 +2687,8 @@ public partial class MainViewModel : ViewModelBase
 
         var runningVmIds = runtimeVms
             .Where(vm => IsRunningState(vm.State) && !string.IsNullOrWhiteSpace(vm.VmId))
-            .Select(vm => vm.VmId.Trim())
+            .Select(vm => NormalizeVmId(vm.VmId))
+            .Where(vmId => !string.IsNullOrWhiteSpace(vmId))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var runningVmNames = runtimeVms
             .Where(vm => IsRunningState(vm.State) && !string.IsNullOrWhiteSpace(vm.Name))
@@ -2437,8 +2723,138 @@ public partial class MainViewModel : ViewModelBase
 
             var withoutAckDuration = now - withoutAckSinceUtc;
 
-            var hasSourceVmId = UsbGuestConnectionRegistry.TryGetGuestVmId(busId, out var sourceVmId)
-                                && !string.IsNullOrWhiteSpace(sourceVmId);
+            var hasSourceVmId = UsbGuestConnectionRegistry.TryGetGuestVmId(busId, out var sourceVmIdRaw)
+                                && !string.IsNullOrWhiteSpace(sourceVmIdRaw);
+            var sourceVmId = hasSourceVmId
+                ? NormalizeVmId(sourceVmIdRaw)
+                : string.Empty;
+
+            if (hasSourceVmId && string.IsNullOrWhiteSpace(sourceVmId))
+            {
+                hasSourceVmId = false;
+            }
+
+            var sourceVmIsRunning = hasSourceVmId && runningVmIds.Contains(sourceVmId);
+
+            if (hasSourceVmId
+                && sourceVmIsRunning
+                && withoutAckDuration < VmOffDetachVmWideFreshActivityGracePeriod)
+            {
+                if (withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
+                {
+                    Log.Debug(
+                        "USB attach has known VM ownership but guest activity is temporarily stale; auto-detach deferred. BusId={BusId}; SourceVmId={SourceVmId}; AckAgeSeconds={AckAgeSeconds}; GraceSeconds={GraceSeconds}",
+                        busId,
+                        sourceVmId,
+                        (int)withoutAckDuration.TotalSeconds,
+                        (int)VmOffDetachVmWideFreshActivityGracePeriod.TotalSeconds);
+                }
+
+                _usbVmNotRunningSinceUtc.Remove(busId);
+                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                _usbAttachedWithoutAckAttempts.Remove(busId);
+                _usbForceDetachFallbackBusIds.Remove(busId);
+                continue;
+            }
+
+            if (hasSourceVmId
+                && sourceVmIsRunning
+                && UsbGuestConnectionRegistry.TryGetGuestComputerNameBySourceVmId(
+                    sourceVmId,
+                    out _,
+                    VmOffDetachVmWideFreshActivityGracePeriod))
+            {
+                if (withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
+                {
+                    Log.Debug(
+                        "USB stale guest activity detected but VM-wide USB activity is still fresh; auto-detach skipped. BusId={BusId}; SourceVmId={SourceVmId}; AckAgeSeconds={AckAgeSeconds}",
+                        busId,
+                        sourceVmId,
+                        (int)withoutAckDuration.TotalSeconds);
+                }
+
+                _usbVmNotRunningSinceUtc.Remove(busId);
+                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                _usbAttachedWithoutAckAttempts.Remove(busId);
+                _usbForceDetachFallbackBusIds.Remove(busId);
+                continue;
+            }
+
+            if (hasSourceVmId)
+            {
+                if (sourceVmIsRunning)
+                {
+                    if (withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
+                    {
+                        Log.Debug(
+                            "USB attach has known VM ownership and VM is still running; VM-off auto-detach skipped. BusId={BusId}; SourceVmId={SourceVmId}; AckAgeSeconds={AckAgeSeconds}",
+                            busId,
+                            sourceVmId,
+                            (int)withoutAckDuration.TotalSeconds);
+                    }
+
+                    _usbVmNotRunningSinceUtc.Remove(busId);
+                    _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                    _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                    _usbAttachedWithoutAckAttempts.Remove(busId);
+                    _usbForceDetachFallbackBusIds.Remove(busId);
+                    continue;
+                }
+
+                if (_usbVmOffDetachManualRequiredBusIds.Contains(busId))
+                {
+                    continue;
+                }
+
+                if (!_usbVmNotRunningSinceUtc.TryGetValue(busId, out var vmNotRunningSinceUtc))
+                {
+                    _usbVmNotRunningSinceUtc[busId] = now;
+                    _usbAttachedWithoutAckAttempts[busId] = 0;
+                    continue;
+                }
+
+                var vmOffDuration = now - vmNotRunningSinceUtc;
+                if (vmOffDuration < VmAutoDetachDelayAfterVmStop)
+                {
+                    continue;
+                }
+
+                var confirmationTarget = Math.Clamp(_usbAutoDetachRetryAttempts, 1, 2);
+                _usbAttachedWithoutAckAttempts.TryGetValue(busId, out var confirmationAttempts);
+                confirmationAttempts++;
+                _usbAttachedWithoutAckAttempts[busId] = confirmationAttempts;
+
+                if (confirmationAttempts < confirmationTarget)
+                {
+                    Log.Debug(
+                        "USB VM-off auto-detach pending confirmation. BusId={BusId}; SourceVmId={SourceVmId}; Attempt={Attempt}/{Target}; VmOffSeconds={VmOffSeconds}",
+                        busId,
+                        sourceVmId,
+                        confirmationAttempts,
+                        confirmationTarget,
+                        (int)vmOffDuration.TotalSeconds);
+                    continue;
+                }
+
+                var detached = await TryDetachBusWithRetryAsync(busId, _usbAutoDetachRetryDelay, token, "vm-off-known-owner");
+                if (detached)
+                {
+                    detachedCount++;
+                    _usbVmNotRunningSinceUtc.Remove(busId);
+                    _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                    _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                    _usbAttachedWithoutAckAttempts.Remove(busId);
+                    _usbForceDetachFallbackBusIds.Remove(busId);
+                }
+                else
+                {
+                    _usbVmOffDetachManualRequiredBusIds.Add(busId);
+                }
+
+                continue;
+            }
 
             if (!hasSourceVmId)
             {
@@ -2447,57 +2863,22 @@ public partial class MainViewModel : ViewModelBase
                 if (!string.IsNullOrWhiteSpace(attachedGuestName)
                     && runningVmNames.Contains(attachedGuestName))
                 {
-                    if (!_usbForceDetachFallbackBusIds.Contains(busId)
-                        && withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
+                    // Keep loopback attach stable while the mapped VM is running.
+                    // Guest diagnostics can pause transiently; detaching here causes false disconnects.
+                    if (withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
                     {
-                        try
-                        {
-                            var detached = await TryDetachBusWithRetryAsync(
-                                busId,
-                                initialDelay: TimeSpan.Zero,
-                                token,
-                                context: "loopback-no-guest-activity-running-vm");
-
-                            if (detached)
-                            {
-                                _usbVmNotRunningSinceUtc.Remove(busId);
-                                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
-                                _usbAttachedWithoutAckSinceUtc.Remove(busId);
-                                _usbAttachedWithoutAckAttempts.Remove(busId);
-                                _usbForceDetachFallbackBusIds.Remove(busId);
-                                detachedCount++;
-
-                                Log.Information(
-                                    "USB auto-detach executed after missing guest activity for {GraceSeconds}s while VM still reports running. BusId={BusId}; AttachedGuestName={AttachedGuestName}",
-                                    (int)LoopbackManagedUsbAttachGraceFloor.TotalSeconds,
-                                    busId,
-                                    attachedGuestName);
-                                continue;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            var attempt = _usbAttachedWithoutAckAttempts.TryGetValue(busId, out var existingAttempt)
-                                ? existingAttempt + 1
-                                : 1;
-                            _usbAttachedWithoutAckAttempts[busId] = attempt;
-
-                            if (attempt >= 3)
-                            {
-                                _usbForceDetachFallbackBusIds.Add(busId);
-                            }
-
-                            Log.Warning(
-                                ex,
-                                "USB auto-detach after missing guest activity failed. BusId={BusId}; AttachedGuestName={AttachedGuestName}; Attempt={Attempt}",
-                                busId,
-                                attachedGuestName,
-                                attempt);
-                        }
+                        Log.Debug(
+                            "USB attach without fresh guest activity observed while VM still runs; auto-detach skipped. BusId={BusId}; AttachedGuestName={AttachedGuestName}; AckAgeSeconds={AckAgeSeconds}",
+                            busId,
+                            attachedGuestName,
+                            (int)withoutAckDuration.TotalSeconds);
                     }
 
                     _usbVmNotRunningSinceUtc.Remove(busId);
                     _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                    _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                    _usbAttachedWithoutAckAttempts.Remove(busId);
+                    _usbForceDetachFallbackBusIds.Remove(busId);
                     continue;
                 }
 
@@ -2505,55 +2886,19 @@ public partial class MainViewModel : ViewModelBase
                 // avoid false-detach during short startup/reconnect windows.
                 if (runningVmNames.Count > 0 && string.IsNullOrWhiteSpace(attachedGuestName))
                 {
-                    if (!_usbForceDetachFallbackBusIds.Contains(busId)
-                        && withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
+                    if (withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
                     {
-                        try
-                        {
-                            var detached = await TryDetachBusWithRetryAsync(
-                                busId,
-                                initialDelay: TimeSpan.Zero,
-                                token,
-                                context: "loopback-no-guest-activity-unknown-owner");
-
-                            if (detached)
-                            {
-                                _usbVmNotRunningSinceUtc.Remove(busId);
-                                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
-                                _usbAttachedWithoutAckSinceUtc.Remove(busId);
-                                _usbAttachedWithoutAckAttempts.Remove(busId);
-                                _usbForceDetachFallbackBusIds.Remove(busId);
-                                detachedCount++;
-
-                                Log.Information(
-                                    "USB auto-detach executed after missing guest activity for {GraceSeconds}s with unknown owner mapping. BusId={BusId}",
-                                    (int)LoopbackManagedUsbAttachGraceFloor.TotalSeconds,
-                                    busId);
-                                continue;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            var attempt = _usbAttachedWithoutAckAttempts.TryGetValue(busId, out var existingAttempt)
-                                ? existingAttempt + 1
-                                : 1;
-                            _usbAttachedWithoutAckAttempts[busId] = attempt;
-
-                            if (attempt >= 3)
-                            {
-                                _usbForceDetachFallbackBusIds.Add(busId);
-                            }
-
-                            Log.Warning(
-                                ex,
-                                "USB auto-detach after missing guest activity (unknown owner) failed. BusId={BusId}; Attempt={Attempt}",
-                                busId,
-                                attempt);
-                        }
+                        Log.Debug(
+                            "USB attach without owner mapping while at least one VM runs; auto-detach skipped. BusId={BusId}; AckAgeSeconds={AckAgeSeconds}",
+                            busId,
+                            (int)withoutAckDuration.TotalSeconds);
                     }
 
                     _usbVmNotRunningSinceUtc.Remove(busId);
                     _usbVmOffDetachManualRequiredBusIds.Remove(busId);
+                    _usbAttachedWithoutAckSinceUtc.Remove(busId);
+                    _usbAttachedWithoutAckAttempts.Remove(busId);
+                    _usbForceDetachFallbackBusIds.Remove(busId);
                     continue;
                 }
 
@@ -2573,151 +2918,12 @@ public partial class MainViewModel : ViewModelBase
                     continue;
                 }
 
-                try
-                {
-                    var detachedUnknownOwner = await TryDetachBusWithRetryAsync(
-                        busId,
-                        initialDelay: TimeSpan.Zero,
-                        token,
-                        context: "vm-not-running-unknown-owner");
-
-                    if (!detachedUnknownOwner)
-                    {
-                        _usbVmNotRunningSinceUtc.Remove(busId);
-                        _usbVmOffDetachManualRequiredBusIds.Add(busId);
-                        continue;
-                    }
-
-                    _usbVmNotRunningSinceUtc.Remove(busId);
-                    _usbVmOffDetachManualRequiredBusIds.Remove(busId);
-                    detachedCount++;
-
-                    Log.Information(
-                        "USB auto-detach executed for loopback attach without VM ownership mapping after {DelaySeconds}s. BusId={BusId}; AttachedGuestName={AttachedGuestName}",
-                        (int)VmAutoDetachDelayAfterVmStop.TotalSeconds,
-                        busId,
-                        string.IsNullOrWhiteSpace(attachedGuestName) ? "-" : attachedGuestName);
-                }
-                catch (Exception ex)
-                {
-                    _usbVmNotRunningSinceUtc.Remove(busId);
-                    _usbVmOffDetachManualRequiredBusIds.Add(busId);
-                    Log.Warning(
-                        ex,
-                        "USB auto-detach without VM ownership mapping failed; manual detach/unshare required. BusId={BusId}; AttachedGuestName={AttachedGuestName}",
-                        busId,
-                        string.IsNullOrWhiteSpace(attachedGuestName) ? "-" : attachedGuestName);
-                }
-
-                continue;
-            }
-
-            if (runningVmIds.Contains(sourceVmId))
-            {
-                if (!_usbForceDetachFallbackBusIds.Contains(busId)
-                    && withoutAckDuration >= LoopbackManagedUsbAttachGraceFloor)
-                {
-                    try
-                    {
-                        var detached = await TryDetachBusWithRetryAsync(
-                            busId,
-                            initialDelay: TimeSpan.Zero,
-                            token,
-                            context: "running-vm-stale-guest-ack");
-
-                        if (detached)
-                        {
-                            _usbVmNotRunningSinceUtc.Remove(busId);
-                            _usbVmOffDetachManualRequiredBusIds.Remove(busId);
-                            _usbAttachedWithoutAckSinceUtc.Remove(busId);
-                            _usbAttachedWithoutAckAttempts.Remove(busId);
-                            _usbForceDetachFallbackBusIds.Remove(busId);
-                            detachedCount++;
-
-                            Log.Information(
-                                "USB auto-detach executed after stale guest activity while VM still reports running. BusId={BusId}; SourceVmId={SourceVmId}; GraceSeconds={GraceSeconds}",
-                                busId,
-                                sourceVmId,
-                                (int)LoopbackManagedUsbAttachGraceFloor.TotalSeconds);
-                            continue;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        var attempt = _usbAttachedWithoutAckAttempts.TryGetValue(busId, out var existingAttempt)
-                            ? existingAttempt + 1
-                            : 1;
-                        _usbAttachedWithoutAckAttempts[busId] = attempt;
-
-                        if (attempt >= 3)
-                        {
-                            _usbForceDetachFallbackBusIds.Add(busId);
-                        }
-
-                        Log.Warning(
-                            ex,
-                            "USB auto-detach after stale guest activity failed while VM still reports running. BusId={BusId}; SourceVmId={SourceVmId}; Attempt={Attempt}",
-                            busId,
-                            sourceVmId,
-                            attempt);
-                    }
-                }
-
-                _usbVmNotRunningSinceUtc.Remove(busId);
-                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
-                continue;
-            }
-
-            if (_usbVmOffDetachManualRequiredBusIds.Contains(busId))
-            {
-                continue;
-            }
-
-            if (!_usbVmNotRunningSinceUtc.TryGetValue(busId, out var vmNotRunningSinceUtc))
-            {
-                _usbVmNotRunningSinceUtc[busId] = now;
-                continue;
-            }
-
-            if ((now - vmNotRunningSinceUtc) < VmAutoDetachDelayAfterVmStop)
-            {
-                continue;
-            }
-
-            try
-            {
-                var detached = await TryDetachBusWithRetryAsync(
+                Log.Debug(
+                    "USB auto-detach skipped because ownership is not confirmed. BusId={BusId}; AttachedGuestName={AttachedGuestName}",
                     busId,
-                    initialDelay: TimeSpan.Zero,
-                    token,
-                    context: "vm-not-running");
+                    string.IsNullOrWhiteSpace(attachedGuestName) ? "-" : attachedGuestName);
 
-                if (!detached)
-                {
-                    _usbVmNotRunningSinceUtc.Remove(busId);
-                    _usbVmOffDetachManualRequiredBusIds.Add(busId);
-                    continue;
-                }
-
-                _usbVmNotRunningSinceUtc.Remove(busId);
-                _usbVmOffDetachManualRequiredBusIds.Remove(busId);
-                detachedCount++;
-
-                Log.Information(
-                    "USB auto-detach executed because owning VM is not running for {DelaySeconds}s. BusId={BusId}; SourceVmId={SourceVmId}",
-                    (int)VmAutoDetachDelayAfterVmStop.TotalSeconds,
-                    busId,
-                    sourceVmId);
-            }
-            catch (Exception ex)
-            {
-                _usbVmNotRunningSinceUtc.Remove(busId);
-                _usbVmOffDetachManualRequiredBusIds.Add(busId);
-                Log.Warning(
-                    ex,
-                    "USB auto-detach after VM stop failed; manual detach/unshare required. BusId={BusId}; SourceVmId={SourceVmId}",
-                    busId,
-                    sourceVmId);
+                continue;
             }
         }
 
@@ -2758,6 +2964,44 @@ public partial class MainViewModel : ViewModelBase
         }
 
         return true;
+    }
+
+    private static bool UsbDeviceIdentitySetMatch(IList<UsbIpDeviceInfo> current, IReadOnlyList<UsbIpDeviceInfo> next)
+    {
+        if (current.Count != next.Count)
+        {
+            return false;
+        }
+
+        var currentCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var device in current)
+        {
+            var key = BuildUsbSelectionKey(device);
+            if (!currentCounts.TryAdd(key, 1))
+            {
+                currentCounts[key]++;
+            }
+        }
+
+        foreach (var device in next)
+        {
+            var key = BuildUsbSelectionKey(device);
+            if (!currentCounts.TryGetValue(key, out var count) || count <= 0)
+            {
+                return false;
+            }
+
+            if (count == 1)
+            {
+                currentCounts.Remove(key);
+            }
+            else
+            {
+                currentCounts[key] = count - 1;
+            }
+        }
+
+        return currentCounts.Count == 0;
     }
 
     private static bool UsbDeviceVisualMatch(UsbIpDeviceInfo left, UsbIpDeviceInfo right)
@@ -3386,6 +3630,18 @@ public partial class MainViewModel : ViewModelBase
         {
             var selectedVmName = SelectedVm.Name;
             var previouslySelectedAdapterName = SelectedVmNetworkAdapter?.Name;
+
+            if (TryGetFreshVmNetworkAdapterRuntimeCache(selectedVmName, out var cachedRuntimeAdapters))
+            {
+                ApplyVmNetworkAdaptersToSelection(selectedVmName, cachedRuntimeAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch);
+                return;
+            }
+
+            if (TryGetStartupCachedVmNetworkAdapters(selectedVmName, out var cachedStartupAdapters))
+            {
+                ApplyVmNetworkAdaptersToSelection(selectedVmName, cachedStartupAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch: false);
+            }
+
             var adapters = await _hyperVService.GetVmNetworkAdaptersAsync(selectedVmName, _lifetimeCancellation.Token);
 
             if (SelectedVm is null || !string.Equals(SelectedVm.Name, selectedVmName, StringComparison.OrdinalIgnoreCase))
@@ -3393,45 +3649,172 @@ public partial class MainViewModel : ViewModelBase
                 return;
             }
 
-            AvailableVmNetworkAdapters.Clear();
-            foreach (var adapter in adapters.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
-            {
-                ApplyGuestNetworkDiagnosticsToAdapter(adapter);
-                AvailableVmNetworkAdapters.Add(adapter);
-            }
-
-            if (AvailableVmNetworkAdapters.Count == 0)
-            {
-                SelectedVmNetworkAdapter = null;
-                SelectedVmCurrentSwitch = NotConnectedSwitchDisplay;
-                SelectedSwitch = null;
-                NetworkSwitchStatusHint = "Keine VM-Netzwerkkarten gefunden.";
-                ConnectSelectedSwitchCommand.NotifyCanExecuteChanged();
-                DisconnectSwitchCommand.NotifyCanExecuteChanged();
-                return;
-            }
-
-            SelectedVmNetworkAdapter = AvailableVmNetworkAdapters.FirstOrDefault(item =>
-                                          string.Equals(item.Name, previouslySelectedAdapterName, StringComparison.OrdinalIgnoreCase))
-                                      ?? AvailableVmNetworkAdapters.FirstOrDefault();
-
-            SelectedVmCurrentSwitch = NormalizeSwitchDisplayName(SelectedVmNetworkAdapter?.SwitchName);
-
-            var selectedVmEntry = AvailableVms.FirstOrDefault(vm =>
-                string.Equals(vm.Name, selectedVmName, StringComparison.OrdinalIgnoreCase));
-
-            if (selectedVmEntry is not null)
-            {
-                selectedVmEntry.RuntimeSwitchName = SelectedVmCurrentSwitch;
-            }
-
-            SyncSelectedSwitchWithCurrentVm(showNotificationOnMissingSwitch);
-            NotifyTrayStateChanged();
+            var normalizedAdapters = NormalizeVmNetworkAdapters(adapters);
+            UpdateVmNetworkAdapterRuntimeCache(selectedVmName, normalizedAdapters);
+            UpdateStartupReadCache(vmNetworkAdaptersVmName: selectedVmName, vmNetworkAdapters: normalizedAdapters);
+            ApplyVmNetworkAdaptersToSelection(selectedVmName, normalizedAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch);
         }
         catch (Exception ex)
         {
             Log.Warning(ex, "Netzwerkkarten für VM {VmName} konnten nicht gelesen werden.", SelectedVm.Name);
         }
+    }
+
+    private void ApplyVmNetworkAdaptersToSelection(
+        string selectedVmName,
+        IReadOnlyList<HyperVVmNetworkAdapterInfo> adapters,
+        string? previouslySelectedAdapterName,
+        bool showNotificationOnMissingSwitch)
+    {
+        if (SelectedVm is null || !string.Equals(SelectedVm.Name, selectedVmName, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        AvailableVmNetworkAdapters.Clear();
+        foreach (var adapter in adapters)
+        {
+            AvailableVmNetworkAdapters.Add(new HyperVVmNetworkAdapterInfo
+            {
+                Name = adapter.Name,
+                SwitchName = adapter.SwitchName,
+                MacAddress = adapter.MacAddress,
+                IpAddresses = [.. adapter.IpAddresses],
+                Ipv4Address = adapter.Ipv4Address,
+                Ipv4SubnetMask = adapter.Ipv4SubnetMask,
+                Ipv4Gateway = adapter.Ipv4Gateway,
+                GuestComputerName = adapter.GuestComputerName
+            });
+        }
+
+        if (AvailableVmNetworkAdapters.Count == 0)
+        {
+            SelectedVmNetworkAdapter = null;
+            SelectedVmCurrentSwitch = NotConnectedSwitchDisplay;
+            SelectedSwitch = null;
+            NetworkSwitchStatusHint = "Keine VM-Netzwerkkarten gefunden.";
+            ConnectSelectedSwitchCommand.NotifyCanExecuteChanged();
+            DisconnectSwitchCommand.NotifyCanExecuteChanged();
+            return;
+        }
+
+        SelectedVmNetworkAdapter = AvailableVmNetworkAdapters.FirstOrDefault(item =>
+                                      string.Equals(item.Name, previouslySelectedAdapterName, StringComparison.OrdinalIgnoreCase))
+                                  ?? AvailableVmNetworkAdapters.FirstOrDefault();
+
+        SelectedVmCurrentSwitch = NormalizeSwitchDisplayName(SelectedVmNetworkAdapter?.SwitchName);
+
+        var selectedVmEntry = AvailableVms.FirstOrDefault(vm =>
+            string.Equals(vm.Name, selectedVmName, StringComparison.OrdinalIgnoreCase));
+
+        if (selectedVmEntry is not null)
+        {
+            selectedVmEntry.RuntimeSwitchName = SelectedVmCurrentSwitch;
+        }
+
+        SyncSelectedSwitchWithCurrentVm(showNotificationOnMissingSwitch);
+        NotifyTrayStateChanged();
+    }
+
+    private IReadOnlyList<HyperVVmNetworkAdapterInfo> NormalizeVmNetworkAdapters(IEnumerable<HyperVVmNetworkAdapterInfo> adapters)
+    {
+        var normalized = adapters
+            .Where(adapter => adapter is not null)
+            .Select(adapter => new HyperVVmNetworkAdapterInfo
+            {
+                Name = (adapter.Name ?? string.Empty).Trim(),
+                SwitchName = NormalizeSwitchDisplayName(adapter.SwitchName),
+                MacAddress = (adapter.MacAddress ?? string.Empty).Trim(),
+                IpAddresses = [.. adapter.IpAddresses],
+                Ipv4Address = (adapter.Ipv4Address ?? string.Empty).Trim(),
+                Ipv4SubnetMask = (adapter.Ipv4SubnetMask ?? string.Empty).Trim(),
+                Ipv4Gateway = (adapter.Ipv4Gateway ?? string.Empty).Trim(),
+                GuestComputerName = (adapter.GuestComputerName ?? string.Empty).Trim()
+            })
+            .Where(adapter => !string.IsNullOrWhiteSpace(adapter.Name))
+            .GroupBy(adapter => adapter.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderBy(adapter => adapter.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var adapter in normalized)
+        {
+            ApplyGuestNetworkDiagnosticsToAdapter(adapter);
+        }
+
+        return normalized;
+    }
+
+    private bool TryGetFreshVmNetworkAdapterRuntimeCache(string vmName, out IReadOnlyList<HyperVVmNetworkAdapterInfo> adapters)
+    {
+        adapters = [];
+        if (string.IsNullOrWhiteSpace(vmName))
+        {
+            return false;
+        }
+
+        if (!_vmNetworkAdaptersRuntimeCacheByVmName.TryGetValue(vmName.Trim(), out var cacheEntry))
+        {
+            return false;
+        }
+
+        if ((DateTimeOffset.UtcNow - cacheEntry.CachedAtUtc) > VmNetworkAdapterRuntimeCacheTtl)
+        {
+            return false;
+        }
+
+        adapters = cacheEntry.Adapters;
+        return adapters.Count > 0;
+    }
+
+    private void UpdateVmNetworkAdapterRuntimeCache(string vmName, IReadOnlyList<HyperVVmNetworkAdapterInfo> adapters)
+    {
+        var normalizedVmName = (vmName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedVmName))
+        {
+            return;
+        }
+
+        _vmNetworkAdaptersRuntimeCacheByVmName[normalizedVmName] =
+            (DateTimeOffset.UtcNow, NormalizeVmNetworkAdapters(adapters));
+    }
+
+    private bool TryGetStartupCachedVmNetworkAdapters(string vmName, out IReadOnlyList<HyperVVmNetworkAdapterInfo> adapters)
+    {
+        adapters = [];
+        var normalizedVmName = (vmName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedVmName))
+        {
+            return false;
+        }
+
+        if (!TryReadStartupReadCache(out var snapshot))
+        {
+            return false;
+        }
+
+        var vmNetworkAdapterEntries = snapshot.VmNetworkAdapters ?? [];
+        var cacheEntry = vmNetworkAdapterEntries.FirstOrDefault(entry =>
+            string.Equals(entry.VmName, normalizedVmName, StringComparison.OrdinalIgnoreCase));
+        if (cacheEntry is null)
+        {
+            return false;
+        }
+
+        if ((DateTimeOffset.UtcNow - cacheEntry.CachedAtUtc) > StartupReadCacheMaxAge)
+        {
+            return false;
+        }
+
+        var normalized = NormalizeVmNetworkAdapters(cacheEntry.Adapters ?? []);
+        if (normalized.Count == 0)
+        {
+            return false;
+        }
+
+        adapters = normalized;
+        UpdateVmNetworkAdapterRuntimeCache(normalizedVmName, normalized);
+        return true;
     }
 
     private void SyncSelectedSwitchWithCurrentVm(bool showNotificationOnMissingSwitch)
@@ -3703,7 +4086,7 @@ public partial class MainViewModel : ViewModelBase
 
             if (UiOpenConsoleAfterVmStart)
             {
-                await _hyperVService.OpenVmConnectAsync(targetVm, VmConnectComputerName, ShouldOpenConsoleWithSessionEdit(targetVm), token);
+                await OpenVmConsoleAfterStartAsync(targetVm, token);
                 AddNotification($"Konsole für '{targetVm}' geöffnet.", "Info");
             }
         });
@@ -3736,13 +4119,16 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        if (!await _vmStatusRefreshGate.WaitAsync(0))
-        {
-            return;
-        }
+        var gateAcquired = false;
 
         try
         {
+            gateAcquired = await _vmStatusRefreshGate.WaitAsync(TimeSpan.FromSeconds(2));
+            if (!gateAcquired)
+            {
+                return;
+            }
+
             var targetVmName = SelectedVm.Name;
 
             await ExecuteBusyActionAsync("VM-Status wird aktualisiert...", async token =>
@@ -3763,7 +4149,10 @@ public partial class MainViewModel : ViewModelBase
         }
         finally
         {
-            _vmStatusRefreshGate.Release();
+            if (gateAcquired)
+            {
+                _vmStatusRefreshGate.Release();
+            }
         }
     }
 
@@ -3883,7 +4272,7 @@ public partial class MainViewModel : ViewModelBase
         existing.MountedIsoPath = runtimeVm.MountedIsoPath;
     }
 
-    private async Task LoadCheckpointsAsync()
+    private async Task LoadCheckpointsAsync(bool showSuccessNotification = true)
     {
         if (SelectedVm is null)
         {
@@ -3903,31 +4292,8 @@ public partial class MainViewModel : ViewModelBase
                 return;
             }
 
-            AvailableCheckpoints.Clear();
-            foreach (var checkpoint in checkpoints.OrderByDescending(item => item.Created))
-            {
-                AvailableCheckpoints.Add(checkpoint);
-            }
-
-            RebuildCheckpointTree(checkpoints);
-
-            var newestCheckpoint = checkpoints
-                .OrderByDescending(item => item.Created)
-                .ThenByDescending(item => item.Name, StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
-
-            if (newestCheckpoint is null)
-            {
-                SelectedCheckpointNode = null;
-                SelectedCheckpoint = null;
-            }
-            else
-            {
-                SelectedCheckpointNode = FindCheckpointNodeById(newestCheckpoint.Id);
-                SelectedCheckpoint = newestCheckpoint;
-            }
-
-            AddNotification($"{AvailableCheckpoints.Count} Checkpoint(s) für '{vmName}' geladen.", "Info");
+            ApplyCheckpointSnapshotToUi(vmName, checkpoints, showSuccessNotification);
+            UpdateStartupReadCache(checkpointVmName: vmName, vmCheckpoints: checkpoints);
         }
         catch (UnauthorizedAccessException ex)
         {
@@ -3938,6 +4304,72 @@ public partial class MainViewModel : ViewModelBase
         {
             Log.Error(ex, "Checkpoint laden fehlgeschlagen für VM {VmName}", vmName);
             AddNotification($"Fehler beim Laden der Checkpoints: {ex.Message}", "Error");
+        }
+    }
+
+    private bool TryApplyCheckpointCacheForVm(string vmName)
+    {
+        if (string.IsNullOrWhiteSpace(vmName))
+        {
+            return false;
+        }
+
+        if (!TryReadStartupReadCache(out var snapshot))
+        {
+            return false;
+        }
+
+        var cacheEntry = snapshot.VmCheckpoints.FirstOrDefault(entry =>
+            string.Equals(entry.VmName, vmName, StringComparison.OrdinalIgnoreCase));
+        if (cacheEntry is null)
+        {
+            return false;
+        }
+
+        if (DateTimeOffset.UtcNow - cacheEntry.CachedAtUtc > StartupReadCacheMaxAge)
+        {
+            return false;
+        }
+
+        ApplyCheckpointSnapshotToUi(vmName, cacheEntry.Checkpoints, showSuccessNotification: false);
+        return true;
+    }
+
+    private void ApplyCheckpointSnapshotToUi(string vmName, IReadOnlyList<HyperVCheckpointInfo> checkpoints, bool showSuccessNotification)
+    {
+        if (SelectedVm is null || !string.Equals(SelectedVm.Name, vmName, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var ordered = checkpoints
+            .OrderByDescending(item => item.Created)
+            .ThenByDescending(item => item.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        AvailableCheckpoints.Clear();
+        foreach (var checkpoint in ordered)
+        {
+            AvailableCheckpoints.Add(checkpoint);
+        }
+
+        RebuildCheckpointTree(ordered);
+
+        var newestCheckpoint = ordered.FirstOrDefault();
+        if (newestCheckpoint is null)
+        {
+            SelectedCheckpointNode = null;
+            SelectedCheckpoint = null;
+        }
+        else
+        {
+            SelectedCheckpointNode = FindCheckpointNodeById(newestCheckpoint.Id);
+            SelectedCheckpoint = newestCheckpoint;
+        }
+
+        if (showSuccessNotification)
+        {
+            AddNotification($"{AvailableCheckpoints.Count} Checkpoint(s) für '{vmName}' geladen.", "Info");
         }
     }
 
@@ -5448,6 +5880,52 @@ public partial class MainViewModel : ViewModelBase
             .ToList();
     }
 
+    public IReadOnlyList<UsbIpDeviceInfo> GetUsbDevicesForGuestSnapshot()
+    {
+        if (!HostUsbSharingEnabled)
+        {
+            return [];
+        }
+
+        // Prefer the live runtime list so metadata toggles (guest block/unblock, custom labels)
+        // and share/unshare state changes are pushed immediately without waiting for a later full inventory refresh.
+        var runtimeSnapshot = UsbDevices
+            .Where(device => device is not null)
+            .Select(CloneUsbDeviceForSnapshot)
+            .ToList();
+
+        if (runtimeSnapshot.Count > 0)
+        {
+            return runtimeSnapshot;
+        }
+
+        return _lastFullUsbInventorySnapshot
+            .Where(device => device is not null)
+            .Select(CloneUsbDeviceForSnapshot)
+            .ToList();
+    }
+
+    private static UsbIpDeviceInfo CloneUsbDeviceForSnapshot(UsbIpDeviceInfo device)
+    {
+        return new UsbIpDeviceInfo
+        {
+            BusId = device.BusId,
+            Description = device.Description,
+            HardwareId = device.HardwareId,
+            HardwareIdentityKey = device.HardwareIdentityKey,
+            InstanceId = device.InstanceId,
+            PersistedGuid = device.PersistedGuid,
+            ClientIpAddress = device.ClientIpAddress,
+            AttachedGuestComputerName = device.AttachedGuestComputerName,
+            DeviceIdentityKey = device.DeviceIdentityKey,
+            CustomName = device.CustomName,
+            CustomComment = device.CustomComment,
+            IsAttachedByOtherGuest = device.IsAttachedByOtherGuest,
+            IsGuestConnectionBlocked = device.IsGuestConnectionBlocked,
+            IsAttachedInCurrentGuest = device.IsAttachedInCurrentGuest
+        };
+    }
+
     public Task SelectUsbDeviceForTrayAsync(string selectionKey)
     {
         if (string.IsNullOrWhiteSpace(selectionKey))
@@ -5546,7 +6024,19 @@ public partial class MainViewModel : ViewModelBase
         {
             await _usbTrayRefreshGate.WaitAsync(_lifetimeCancellation.Token);
             gateEntered = true;
-            await LoadUsbDevicesAsync(showNotification: false, applyAutoShare: true, useBusyIndicator: false);
+
+            var nowUtc = DateTimeOffset.UtcNow;
+            var runMaintenanceRefresh = (nowUtc - _lastTrayUsbMaintenanceRefreshUtc) >= UsbTrayRefreshMaintenanceInterval;
+            await LoadUsbDevicesAsync(
+                showNotification: false,
+                applyAutoShare: runMaintenanceRefresh,
+                useBusyIndicator: false,
+                runVmOffAutoDetachSweep: runMaintenanceRefresh);
+
+            if (runMaintenanceRefresh)
+            {
+                _lastTrayUsbMaintenanceRefreshUtc = nowUtc;
+            }
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
@@ -5643,7 +6133,11 @@ public partial class MainViewModel : ViewModelBase
         return false;
     }
 
-    public async Task HandleUsbClientDisconnectedAsync(string busId, string? hardwareId = null)
+    public async Task HandleUsbClientDisconnectedAsync(
+        string busId,
+        string? hardwareId = null,
+        string? sourceVmId = null,
+        string? guestComputerName = null)
     {
         var normalizedBusId = (busId ?? string.Empty).Trim();
         var normalizedHardwareId = NormalizeUsbHardwareId(hardwareId);
@@ -5687,6 +6181,75 @@ public partial class MainViewModel : ViewModelBase
 
         if (string.IsNullOrWhiteSpace(normalizedBusId)
             || !HostUsbSharingEnabled)
+        {
+            return;
+        }
+
+        var normalizedSourceVmId = NormalizeVmId(sourceVmId);
+        var normalizedGuestComputerName = (guestComputerName ?? string.Empty).Trim();
+
+        if (string.IsNullOrWhiteSpace(normalizedSourceVmId)
+            && UsbGuestConnectionRegistry.TryGetGuestVmId(normalizedBusId, out var registryVmId)
+            && !string.IsNullOrWhiteSpace(registryVmId))
+        {
+            normalizedSourceVmId = NormalizeVmId(registryVmId);
+        }
+
+        if (string.IsNullOrWhiteSpace(normalizedGuestComputerName))
+        {
+            try
+            {
+                var currentHostState = await GetHostUsbStateAsync(normalizedBusId, TimeSpan.FromSeconds(3));
+                normalizedGuestComputerName = (currentHostState?.AttachedGuestComputerName ?? string.Empty).Trim();
+            }
+            catch
+            {
+            }
+        }
+
+        if (UsbGuestConnectionRegistry.TryGetGuestVmId(normalizedBusId, out var currentRegistryVmId)
+            && !string.IsNullOrWhiteSpace(currentRegistryVmId)
+            && !string.IsNullOrWhiteSpace(normalizedSourceVmId)
+            && !string.Equals(NormalizeVmId(currentRegistryVmId), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase))
+        {
+            Log.Debug(
+                "USB detach after guest disconnect skipped due VM ownership mismatch. BusId={BusId}; EventSourceVmId={EventSourceVmId}; RegistrySourceVmId={RegistrySourceVmId}",
+                normalizedBusId,
+                normalizedSourceVmId,
+                NormalizeVmId(currentRegistryVmId));
+            return;
+        }
+
+        if (UsbGuestConnectionRegistry.TryGetGuestComputerName(normalizedBusId, out var currentRegistryGuest)
+            && !string.IsNullOrWhiteSpace(currentRegistryGuest)
+            && !string.IsNullOrWhiteSpace(normalizedGuestComputerName)
+            && !string.Equals(currentRegistryGuest.Trim(), normalizedGuestComputerName, StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(normalizedSourceVmId))
+        {
+            Log.Debug(
+                "USB detach after guest disconnect skipped due guest ownership mismatch without SourceVmId. BusId={BusId}; EventGuest={EventGuest}; RegistryGuest={RegistryGuest}",
+                normalizedBusId,
+                normalizedGuestComputerName,
+                currentRegistryGuest);
+            return;
+        }
+
+        // Be conservative: brief diagnostics jitter/reconnect races must not trigger a hard host detach.
+        // For explicit usb-disconnected events we do not gate on VM running state.
+        try
+        {
+            var recovered = await WaitForUsbDisconnectRecoveryAsync(
+                normalizedBusId,
+                TimeSpan.FromSeconds(4),
+                _lifetimeCancellation.Token);
+
+            if (recovered)
+            {
+                Log.Debug("USB detach after guest disconnect skipped due quick recovery activity. BusId={BusId}", normalizedBusId);
+                return;
+            }
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
             return;
         }
@@ -5778,6 +6341,82 @@ public partial class MainViewModel : ViewModelBase
         }
 
         return HasFreshUsbGuestActivity(busId);
+    }
+
+    private static string NormalizeVmId(string? vmId)
+    {
+        var normalized = (vmId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return string.Empty;
+        }
+
+        normalized = normalized.Trim('{', '}').Trim();
+        return Guid.TryParse(normalized, out var parsed)
+            ? parsed.ToString("D")
+            : normalized;
+    }
+
+    private async Task<bool> IsVmConfirmedNotRunningAsync(string sourceVmId, CancellationToken token)
+    {
+        var normalizedSourceVmId = NormalizeVmId(sourceVmId);
+        if (string.IsNullOrWhiteSpace(normalizedSourceVmId))
+        {
+            return false;
+        }
+
+        try
+        {
+            var runtimeVms = await _hyperVService.GetVmsAsync(token);
+            return !runtimeVms.Any(vm =>
+                !string.IsNullOrWhiteSpace(vm.VmId)
+                && string.Equals(NormalizeVmId(vm.VmId), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase)
+                && IsRunningState(vm.State));
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "VM state confirmation before USB detach failed; detach skipped. SourceVmId={SourceVmId}", normalizedSourceVmId);
+            return false;
+        }
+    }
+
+    private async Task<bool> IsVmRunningForDetachContextAsync(string sourceVmId, string guestComputerName, CancellationToken token)
+    {
+        var normalizedSourceVmId = NormalizeVmId(sourceVmId);
+        var normalizedGuestComputerName = (guestComputerName ?? string.Empty).Trim();
+
+        if (string.IsNullOrWhiteSpace(normalizedSourceVmId) && string.IsNullOrWhiteSpace(normalizedGuestComputerName))
+        {
+            // Without ownership context we cannot safely prove VM inactivity.
+            return true;
+        }
+
+        try
+        {
+            var runtimeVms = await _hyperVService.GetVmsAsync(token);
+            if (!string.IsNullOrWhiteSpace(normalizedSourceVmId))
+            {
+                if (runtimeVms.Any(vm =>
+                    !string.IsNullOrWhiteSpace(vm.VmId)
+                    && string.Equals(NormalizeVmId(vm.VmId), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase)
+                    && IsRunningState(vm.State)))
+                {
+                    return true;
+                }
+
+                return false;
+            }
+
+            return runtimeVms.Any(vm =>
+                !string.IsNullOrWhiteSpace(vm.Name)
+                && string.Equals(vm.Name.Trim(), normalizedGuestComputerName, StringComparison.OrdinalIgnoreCase)
+                && IsRunningState(vm.State));
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "VM running check for USB detach context failed; detach skipped. SourceVmId={SourceVmId}; GuestComputerName={GuestComputerName}", normalizedSourceVmId, normalizedGuestComputerName);
+            return true;
+        }
     }
 
     private static bool HasFreshUsbGuestActivity(string busId)
@@ -6123,6 +6762,9 @@ public partial class MainViewModel : ViewModelBase
                     MacAddress = adapter.MacAddress,
                     IpAddresses = [.. adapter.IpAddresses]
                 })
+                .Where(adapter => !string.IsNullOrWhiteSpace((adapter.Name ?? string.Empty).Trim()))
+                .GroupBy(adapter => (adapter.Name ?? string.Empty).Trim(), StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
                 .ToList();
 
             foreach (var adapter in normalizedAdapters)
@@ -6572,7 +7214,7 @@ public partial class MainViewModel : ViewModelBase
 
             if (UiOpenConsoleAfterVmStart)
             {
-                await _hyperVService.OpenVmConnectAsync(vmName, VmConnectComputerName, ShouldOpenConsoleWithSessionEdit(vmName), token);
+                await OpenVmConsoleAfterStartAsync(vmName, token);
                 AddNotification($"Konsole für '{vmName}' geöffnet.", "Info");
             }
         });
@@ -6616,22 +7258,99 @@ public partial class MainViewModel : ViewModelBase
             return [];
         }
 
-        try
+        var normalizedVmName = vmName.Trim();
+
+        if (SelectedVm is not null
+            && string.Equals(SelectedVm.Name, normalizedVmName, StringComparison.OrdinalIgnoreCase)
+            && AvailableVmNetworkAdapters.Count > 0)
         {
-            var adapters = await _hyperVService.GetVmNetworkAdaptersAsync(vmName, CancellationToken.None);
-            return adapters
+            return NormalizeVmNetworkAdapters(AvailableVmNetworkAdapters)
                 .Select(adapter => new HyperVVmNetworkAdapterInfo
                 {
                     Name = adapter.Name,
                     SwitchName = adapter.SwitchName,
-                    MacAddress = adapter.MacAddress
+                    MacAddress = adapter.MacAddress,
+                    IpAddresses = [.. adapter.IpAddresses],
+                    Ipv4Address = adapter.Ipv4Address,
+                    Ipv4SubnetMask = adapter.Ipv4SubnetMask,
+                    Ipv4Gateway = adapter.Ipv4Gateway,
+                    GuestComputerName = adapter.GuestComputerName
                 })
-                .OrderBy(adapter => adapter.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        if (TryGetFreshVmNetworkAdapterRuntimeCache(normalizedVmName, out var cachedRuntimeAdapters))
+        {
+            return cachedRuntimeAdapters
+                .Select(adapter => new HyperVVmNetworkAdapterInfo
+                {
+                    Name = adapter.Name,
+                    SwitchName = adapter.SwitchName,
+                    MacAddress = adapter.MacAddress,
+                    IpAddresses = [.. adapter.IpAddresses],
+                    Ipv4Address = adapter.Ipv4Address,
+                    Ipv4SubnetMask = adapter.Ipv4SubnetMask,
+                    Ipv4Gateway = adapter.Ipv4Gateway,
+                    GuestComputerName = adapter.GuestComputerName
+                })
+                .ToList();
+        }
+
+        if (TryGetStartupCachedVmNetworkAdapters(normalizedVmName, out var cachedStartupAdapters))
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var live = await _hyperVService.GetVmNetworkAdaptersAsync(normalizedVmName, _lifetimeCancellation.Token);
+                    var normalizedLive = NormalizeVmNetworkAdapters(live);
+                    UpdateVmNetworkAdapterRuntimeCache(normalizedVmName, normalizedLive);
+                    UpdateStartupReadCache(vmNetworkAdaptersVmName: normalizedVmName, vmNetworkAdapters: normalizedLive);
+                }
+                catch
+                {
+                }
+            });
+
+            return cachedStartupAdapters
+                .Select(adapter => new HyperVVmNetworkAdapterInfo
+                {
+                    Name = adapter.Name,
+                    SwitchName = adapter.SwitchName,
+                    MacAddress = adapter.MacAddress,
+                    IpAddresses = [.. adapter.IpAddresses],
+                    Ipv4Address = adapter.Ipv4Address,
+                    Ipv4SubnetMask = adapter.Ipv4SubnetMask,
+                    Ipv4Gateway = adapter.Ipv4Gateway,
+                    GuestComputerName = adapter.GuestComputerName
+                })
+                .ToList();
+        }
+
+        try
+        {
+            var adapters = await _hyperVService.GetVmNetworkAdaptersAsync(normalizedVmName, CancellationToken.None);
+            var normalized = NormalizeVmNetworkAdapters(adapters);
+            UpdateVmNetworkAdapterRuntimeCache(normalizedVmName, normalized);
+            UpdateStartupReadCache(vmNetworkAdaptersVmName: normalizedVmName, vmNetworkAdapters: normalized);
+
+            return normalized
+                .Select(adapter => new HyperVVmNetworkAdapterInfo
+                {
+                    Name = adapter.Name,
+                    SwitchName = adapter.SwitchName,
+                    MacAddress = adapter.MacAddress,
+                    IpAddresses = [.. adapter.IpAddresses],
+                    Ipv4Address = adapter.Ipv4Address,
+                    Ipv4SubnetMask = adapter.Ipv4SubnetMask,
+                    Ipv4Gateway = adapter.Ipv4Gateway,
+                    GuestComputerName = adapter.GuestComputerName
+                })
                 .ToList();
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "Konnte Netzwerkadapter für Tray-Control-Center nicht laden: {VmName}", vmName);
+            Log.Warning(ex, "Konnte Netzwerkadapter für Tray-Control-Center nicht laden: {VmName}", normalizedVmName);
             return [];
         }
     }
@@ -6689,6 +7408,7 @@ public partial class MainViewModel : ViewModelBase
             }
 
             await _hyperVService.ConnectVmNetworkAdapterAsync(vmName, switchName, trayAdapterName, token);
+            ApplyTraySwitchSelectionLocally(vmName, switchName, trayAdapterName, adapters);
 
             if (string.IsNullOrWhiteSpace(trayAdapterName))
             {
@@ -6709,6 +7429,61 @@ public partial class MainViewModel : ViewModelBase
         });
 
         await RefreshVmStatusByNameAsync(vmName);
+    }
+
+    private void ApplyTraySwitchSelectionLocally(string vmName, string switchName, string? adapterName, IReadOnlyList<HyperVVmNetworkAdapterInfo>? knownAdapters = null)
+    {
+        if (string.IsNullOrWhiteSpace(vmName) || string.IsNullOrWhiteSpace(switchName))
+        {
+            return;
+        }
+
+        var normalizedVmName = vmName.Trim();
+        var normalizedSwitchName = NormalizeSwitchDisplayName(switchName);
+        var normalizedAdapterName = (adapterName ?? string.Empty).Trim();
+
+        if (string.IsNullOrWhiteSpace(normalizedAdapterName) && knownAdapters?.Count == 1)
+        {
+            normalizedAdapterName = (knownAdapters[0].Name ?? string.Empty).Trim();
+        }
+
+        var vmEntry = AvailableVms.FirstOrDefault(vm =>
+            string.Equals(vm.Name, normalizedVmName, StringComparison.OrdinalIgnoreCase));
+        if (vmEntry is not null)
+        {
+            vmEntry.RuntimeSwitchName = normalizedSwitchName;
+        }
+
+        if (SelectedVm is null || !string.Equals(SelectedVm.Name, normalizedVmName, StringComparison.OrdinalIgnoreCase))
+        {
+            NotifyTrayStateChanged();
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(normalizedAdapterName) && AvailableVmNetworkAdapters.Count == 1)
+        {
+            normalizedAdapterName = (AvailableVmNetworkAdapters[0].Name ?? string.Empty).Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(normalizedAdapterName))
+        {
+            var matchingAdapter = AvailableVmNetworkAdapters.FirstOrDefault(adapter =>
+                string.Equals(adapter.Name, normalizedAdapterName, StringComparison.OrdinalIgnoreCase));
+            if (matchingAdapter is not null)
+            {
+                matchingAdapter.SwitchName = normalizedSwitchName;
+                if (SelectedVmNetworkAdapter is null
+                    || string.Equals(SelectedVmNetworkAdapter.Name, matchingAdapter.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    SelectedVmNetworkAdapter = matchingAdapter;
+                }
+            }
+        }
+
+        SelectedVmCurrentSwitch = normalizedSwitchName;
+        OnPropertyChanged(nameof(SelectedVmAdapterSwitchDisplay));
+        SyncSelectedSwitchWithCurrentVm(showNotificationOnMissingSwitch: false);
+        NotifyTrayStateChanged();
     }
 
     public async Task DisconnectVmSwitchFromTrayAsync(string vmName)
@@ -6751,6 +7526,15 @@ public partial class MainViewModel : ViewModelBase
 
     public async Task<IReadOnlyList<HostNetworkAdapterInfo>> GetHostNetworkAdaptersWithUplinkAsync()
     {
+        if (TryReadStartupReadCache(out var cachedSnapshot)
+            && DateTimeOffset.UtcNow - cachedSnapshot.CapturedAtUtc <= StartupReadCacheMaxAge
+            && cachedSnapshot.HostNetworkAdapters.Count > 0)
+        {
+            AddNotification($"{cachedSnapshot.HostNetworkAdapters.Count} Host-Netzwerkkarte(n) aus Cache geladen. Live-Refresh läuft im Hintergrund.", "Info");
+            _ = WarmHostNetworkAdapterCacheAsync();
+            return cachedSnapshot.HostNetworkAdapters;
+        }
+
         if (IsBusy)
         {
             AddNotification("Bitte warten, ein anderer Vorgang läuft noch.", "Info");
@@ -6766,6 +7550,8 @@ public partial class MainViewModel : ViewModelBase
                 .OrderByDescending(item => !string.IsNullOrWhiteSpace(item.Gateway))
                 .ThenBy(item => item.AdapterName, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+
+            UpdateStartupReadCache(hostNetworkAdapters: adapters);
         }, showNotificationOnErrorOnly: true);
 
         if (adapters.Length == 0)
@@ -6776,6 +7562,174 @@ public partial class MainViewModel : ViewModelBase
 
         AddNotification($"{adapters.Length} Host-Netzwerkkarte(n) geladen.", "Info");
         return adapters;
+    }
+
+    private async Task WarmHostNetworkAdapterCacheAsync()
+    {
+        try
+        {
+            var result = await _hyperVService.GetHostNetworkAdaptersWithUplinkAsync(_lifetimeCancellation.Token);
+            var ordered = result
+                .OrderByDescending(item => !string.IsNullOrWhiteSpace(item.Gateway))
+                .ThenBy(item => item.AdapterName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            UpdateStartupReadCache(hostNetworkAdapters: ordered);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Host network adapter cache warm-up failed.");
+        }
+    }
+
+    private bool TryReadStartupReadCache(out StartupReadCacheSnapshot snapshot)
+    {
+        snapshot = new StartupReadCacheSnapshot();
+
+        try
+        {
+            var path = GetStartupReadCachePath();
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+
+            string json;
+            lock (_startupReadCacheSync)
+            {
+                json = File.ReadAllText(path);
+            }
+
+            var parsed = JsonSerializer.Deserialize<StartupReadCacheSnapshot>(json);
+            if (parsed is null || !string.Equals(parsed.SchemaVersion, StartupReadCacheSchemaVersion, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            snapshot = parsed;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Failed to read startup cache.");
+            return false;
+        }
+    }
+
+    private void UpdateStartupReadCache(
+        IReadOnlyList<HyperVVmInfo>? vms = null,
+        IReadOnlyList<HyperVSwitchInfo>? switches = null,
+        IReadOnlyList<HostNetworkAdapterInfo>? hostNetworkAdapters = null,
+        string? vmNetworkAdaptersVmName = null,
+        IReadOnlyList<HyperVVmNetworkAdapterInfo>? vmNetworkAdapters = null,
+        string? checkpointVmName = null,
+        IReadOnlyList<HyperVCheckpointInfo>? vmCheckpoints = null)
+    {
+        try
+        {
+            var snapshot = TryReadStartupReadCache(out var current)
+                ? current
+                : new StartupReadCacheSnapshot();
+
+            snapshot.SchemaVersion = StartupReadCacheSchemaVersion;
+            snapshot.CapturedAtUtc = DateTimeOffset.UtcNow;
+            snapshot.VmNetworkAdapters ??= [];
+            snapshot.VmCheckpoints ??= [];
+
+            if (vms is not null)
+            {
+                snapshot.Vms = vms
+                    .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+
+            if (switches is not null)
+            {
+                snapshot.Switches = switches
+                    .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+
+            if (hostNetworkAdapters is not null)
+            {
+                snapshot.HostNetworkAdapters = hostNetworkAdapters
+                    .OrderByDescending(item => !string.IsNullOrWhiteSpace(item.Gateway))
+                    .ThenBy(item => item.AdapterName, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+
+            if (!string.IsNullOrWhiteSpace(vmNetworkAdaptersVmName) && vmNetworkAdapters is not null)
+            {
+                snapshot.VmNetworkAdapters.RemoveAll(entry =>
+                    string.Equals(entry.VmName, vmNetworkAdaptersVmName, StringComparison.OrdinalIgnoreCase));
+
+                snapshot.VmNetworkAdapters.Add(new VmNetworkAdapterCacheEntry
+                {
+                    VmName = vmNetworkAdaptersVmName,
+                    CachedAtUtc = DateTimeOffset.UtcNow,
+                    Adapters = NormalizeVmNetworkAdapters(vmNetworkAdapters)
+                        .Select(adapter => new HyperVVmNetworkAdapterInfo
+                        {
+                            Name = adapter.Name,
+                            SwitchName = adapter.SwitchName,
+                            MacAddress = adapter.MacAddress,
+                            IpAddresses = [.. adapter.IpAddresses],
+                            Ipv4Address = adapter.Ipv4Address,
+                            Ipv4SubnetMask = adapter.Ipv4SubnetMask,
+                            Ipv4Gateway = adapter.Ipv4Gateway,
+                            GuestComputerName = adapter.GuestComputerName
+                        })
+                        .ToList()
+                });
+
+                snapshot.VmNetworkAdapters = snapshot.VmNetworkAdapters
+                    .OrderByDescending(entry => entry.CachedAtUtc)
+                    .Take(128)
+                    .ToList();
+            }
+
+            if (!string.IsNullOrWhiteSpace(checkpointVmName) && vmCheckpoints is not null)
+            {
+                snapshot.VmCheckpoints.RemoveAll(entry =>
+                    string.Equals(entry.VmName, checkpointVmName, StringComparison.OrdinalIgnoreCase));
+
+                snapshot.VmCheckpoints.Add(new VmCheckpointCacheEntry
+                {
+                    VmName = checkpointVmName,
+                    CachedAtUtc = DateTimeOffset.UtcNow,
+                    Checkpoints = vmCheckpoints
+                        .OrderByDescending(item => item.Created)
+                        .ThenByDescending(item => item.Name, StringComparer.OrdinalIgnoreCase)
+                        .Select(CloneCheckpointInfo)
+                        .ToList()
+                });
+
+                snapshot.VmCheckpoints = snapshot.VmCheckpoints
+                    .OrderByDescending(entry => entry.CachedAtUtc)
+                    .Take(96)
+                    .ToList();
+            }
+
+            var path = GetStartupReadCachePath();
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var json = JsonSerializer.Serialize(snapshot);
+            lock (_startupReadCacheSync)
+            {
+                File.WriteAllText(path, json);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Failed to update startup cache.");
+        }
     }
 
     public async Task<bool> SetHostNetworkProfileCategoryAsync(string? adapterName, string category)
@@ -6809,9 +7763,19 @@ public partial class MainViewModel : ViewModelBase
                 ? "aktive Host-Netzprofile"
                 : $"Netzprofil von '{adapterName}'";
 
-            var categoryText = normalizedCategory == "Private" ? "Privat" : "Öffentlich";
-            AddNotification($"{targetText} auf '{categoryText}' gesetzt.", "Success");
-            updated = true;
+            if (string.Equals(HostNetworkProfileCategory, normalizedCategory, StringComparison.OrdinalIgnoreCase))
+            {
+                var categoryText = normalizedCategory == "Private" ? "Privat" : "Öffentlich";
+                AddNotification($"{targetText} auf '{categoryText}' gesetzt.", "Success");
+                updated = true;
+            }
+            else
+            {
+                AddNotification(
+                    "Host-Netzprofil wurde nicht umgestellt. Häufige Ursache: aktives Domänenprofil oder Gruppenrichtlinie.",
+                    "Warning");
+                updated = false;
+            }
         }, showNotificationOnErrorOnly: true);
 
         return updated;
@@ -7837,29 +8801,31 @@ public partial class MainViewModel : ViewModelBase
             .ToList();
     }
 
-    public async Task UnshareAllSharedUsbOnShutdownAsync()
+    public async Task UnshareAllSharedUsbOnShutdownAsync(bool detachOnlyDuringSessionEnding = false)
     {
-        if (IsBusy)
-        {
-            try
-            {
-                await _usbIpService.ShutdownElevatedSessionAsync(CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                Log.Debug(ex, "Elevated USB session could not be closed during shutdown while busy.");
-            }
-
-            return;
-        }
-
+        _usbIpService.SetShutdownCleanupMode(true);
         try
         {
+            if (IsBusy)
+            {
+                try
+                {
+                    await _usbIpService.ShutdownElevatedSessionAsync(CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug(ex, "Elevated USB session could not be closed during shutdown while busy.");
+                }
+
+                return;
+            }
+
             await UnshareAllSharedUsbAsync(
                 timeout: TimeSpan.FromSeconds(20),
                 successMessage: "Beim Beenden wurden {0} USB-Freigabe(n) entfernt.",
                 failedMessage: "Beim Beenden konnten {0} USB-Freigabe(n) nicht entfernt werden.",
-                logContext: "shutdown");
+                logContext: "shutdown",
+                detachOnly: detachOnlyDuringSessionEnding);
         }
         catch (Exception ex)
         {
@@ -7875,10 +8841,12 @@ public partial class MainViewModel : ViewModelBase
             {
                 Log.Debug(ex, "Elevated USB session could not be closed during shutdown cleanup.");
             }
+
+            _usbIpService.SetShutdownCleanupMode(false);
         }
     }
 
-    private async Task UnshareAllSharedUsbAsync(TimeSpan timeout, string successMessage, string failedMessage, string logContext)
+    private async Task UnshareAllSharedUsbAsync(TimeSpan timeout, string successMessage, string failedMessage, string logContext, bool detachOnly = false)
     {
         using var cts = new CancellationTokenSource(timeout);
         IReadOnlyList<UsbIpDeviceInfo> devices;
@@ -7901,54 +8869,181 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        var attachedBusIds = sharedDevices
+            .Where(device => device.IsAttached && !string.IsNullOrWhiteSpace(device.BusId))
+            .Select(device => device.BusId.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         var released = 0;
         var failed = 0;
+        var expectedShutdownDisconnects = 0;
+        var failureSummaryByKey = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var device in sharedDevices)
+        static string buildFailureKey(Exception ex, string stage)
         {
-            try
+            var message = (ex.Message ?? string.Empty).Trim();
+            if (message.Length > 180)
             {
-                if (device.IsAttached && !string.IsNullOrWhiteSpace(device.BusId))
-                {
-                    await _usbIpService.DetachAsync(device.BusId, cts.Token);
-                }
-
-                if (!string.IsNullOrWhiteSpace(device.BusId))
-                {
-                    await _usbIpService.UnbindAsync(device.BusId, cts.Token);
-                }
-                else if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
-                {
-                    await _usbIpService.UnbindByPersistedGuidAsync(device.PersistedGuid, cts.Token);
-                }
-                else
-                {
-                    failed++;
-                    continue;
-                }
-
-                released++;
+                message = message[..180];
             }
-            catch (Exception ex)
+
+            return $"{stage}|{ex.GetType().Name}|{message}";
+        }
+
+        void addFailureSummary(Exception ex, string stage)
+        {
+            var key = buildFailureKey(ex, stage);
+            if (!failureSummaryByKey.TryAdd(key, 1))
             {
-                failed++;
-                Log.Warning(ex,
-                    "Freigeben von USB-Gerät fehlgeschlagen ({Context}) (BusId={BusId}, Guid={Guid}).",
-                    logContext,
-                    device.BusId,
-                    device.PersistedGuid);
+                failureSummaryByKey[key]++;
             }
         }
 
-        if (released > 0)
+        foreach (var busId in attachedBusIds)
+        {
+            try
+            {
+                await _usbIpService.DetachAsync(busId, cts.Token);
+            }
+            catch (Exception ex)
+            {
+                if (string.Equals(logContext, "shutdown", StringComparison.OrdinalIgnoreCase)
+                    && IsExpectedUsbDisconnectDuringShutdown(ex))
+                {
+                    expectedShutdownDisconnects++;
+                    continue;
+                }
+
+                failed++;
+                addFailureSummary(ex, "detach");
+            }
+        }
+
+        if (attachedBusIds.Count > 0)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(350), cts.Token);
+            }
+            catch
+            {
+            }
+        }
+
+        if (!detachOnly)
+        {
+            foreach (var device in sharedDevices)
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(device.BusId))
+                    {
+                        await _usbIpService.UnbindAsync(device.BusId, cts.Token);
+                    }
+                    else if (!string.IsNullOrWhiteSpace(device.PersistedGuid))
+                    {
+                        await _usbIpService.UnbindByPersistedGuidAsync(device.PersistedGuid, cts.Token);
+                    }
+                    else
+                    {
+                        failed++;
+                        continue;
+                    }
+
+                    released++;
+                }
+                catch (Exception ex)
+                {
+                    if (string.Equals(logContext, "shutdown", StringComparison.OrdinalIgnoreCase)
+                        && IsExpectedUsbDisconnectDuringShutdown(ex))
+                    {
+                        expectedShutdownDisconnects++;
+                        continue;
+                    }
+
+                    failed++;
+                    addFailureSummary(ex, "unbind");
+                }
+            }
+        }
+        else
+        {
+            released = Math.Max(released, attachedBusIds.Count - failed);
+            Log.Information("USB shutdown cleanup running in detach-only mode (SessionEnding). Unbind phase skipped.");
+        }
+
+        if (failureSummaryByKey.Count > 0)
+        {
+            foreach (var entry in failureSummaryByKey)
+            {
+                Log.Warning(
+                    "USB shutdown cleanup failure summary ({Context}): {FailureKey} occurred {Count} times.",
+                    logContext,
+                    entry.Key,
+                    entry.Value);
+            }
+        }
+
+        var isShutdownCleanup = string.Equals(logContext, "shutdown", StringComparison.OrdinalIgnoreCase);
+
+        if (released > 0 && !isShutdownCleanup)
         {
             AddNotification(string.Format(successMessage, released), "Info");
         }
 
-        if (failed > 0)
+        if (failed > 0 && !isShutdownCleanup)
         {
             AddNotification(string.Format(failedMessage, failed), "Warning");
         }
+
+        if (expectedShutdownDisconnects > 0)
+        {
+            Log.Information(
+                "USB/IP remote client closed the connection during shutdown. Treated as expected disconnect. Count={Count}",
+                expectedShutdownDisconnects);
+        }
+    }
+
+    private static bool IsExpectedUsbDisconnectDuringShutdown(Exception ex)
+    {
+        static bool containsExpectedText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            return text.Contains("10054", StringComparison.OrdinalIgnoreCase)
+                   || text.Contains("transport connection", StringComparison.OrdinalIgnoreCase)
+                   || text.Contains("remotehost geschlossen", StringComparison.OrdinalIgnoreCase)
+                   || text.Contains("remote host closed", StringComparison.OrdinalIgnoreCase)
+                   || text.Contains("forcibly closed", StringComparison.OrdinalIgnoreCase)
+                   || text.Contains("connection reset", StringComparison.OrdinalIgnoreCase)
+                   || text.Contains("connection was reset", StringComparison.OrdinalIgnoreCase);
+        }
+
+        for (Exception? current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SocketException socketException
+                && (socketException.SocketErrorCode == SocketError.ConnectionReset
+                    || socketException.NativeErrorCode == 10054))
+            {
+                return true;
+            }
+
+            if (current is IOException && containsExpectedText(current.Message))
+            {
+                return true;
+            }
+
+            if (containsExpectedText(current.Message))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string NormalizeVmConnectComputerName(string? computerName)
@@ -8242,12 +9337,46 @@ public partial class MainViewModel : ViewModelBase
 
             if (UiOpenConsoleAfterVmStart)
             {
-                await _hyperVService.OpenVmConnectAsync(vmName, VmConnectComputerName, ShouldOpenConsoleWithSessionEdit(vmName), token);
+                await OpenVmConsoleAfterStartAsync(vmName, token);
                 AddNotification($"Konsole für '{vmName}' geöffnet.", "Info");
             }
         });
 
         await RefreshVmStatusByNameAsync(vmName);
+    }
+
+    private async Task OpenVmConsoleAfterStartAsync(string vmName, CancellationToken cancellationToken)
+    {
+        await WaitForVmRunningBeforeConsoleOpenAsync(vmName, cancellationToken);
+        await Task.Delay(VmConnectLaunchSettleDelay, cancellationToken);
+        await _hyperVService.OpenVmConnectAsync(vmName, VmConnectComputerName, ShouldOpenConsoleWithSessionEdit(vmName), cancellationToken);
+    }
+
+    private async Task WaitForVmRunningBeforeConsoleOpenAsync(string vmName, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < VmConnectOpenRetryPollAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                var runtimeVms = await _hyperVService.GetVmsAsync(cancellationToken);
+                var runtimeState = runtimeVms
+                    .FirstOrDefault(vm => string.Equals(vm.Name, vmName, StringComparison.OrdinalIgnoreCase))?
+                    .State;
+
+                if (IsRunningState(runtimeState))
+                {
+                    return;
+                }
+            }
+            catch
+            {
+                // Best effort: vmconnect open should not fail solely because runtime polling was transiently unavailable.
+            }
+
+            await Task.Delay(VmConnectOpenRetryPollInterval, cancellationToken);
+        }
     }
 
     private async Task RunNumLockWatcherAsync()
@@ -8756,5 +9885,54 @@ public partial class MainViewModel : ViewModelBase
         }
 
         return logDirectoryCandidates[0];
+    }
+
+    private sealed class StartupReadCacheSnapshot
+    {
+        public string SchemaVersion { get; set; } = StartupReadCacheSchemaVersion;
+
+        public DateTimeOffset CapturedAtUtc { get; set; } = DateTimeOffset.MinValue;
+
+        public List<HyperVVmInfo> Vms { get; set; } = [];
+
+        public List<HyperVSwitchInfo> Switches { get; set; } = [];
+
+        public List<HostNetworkAdapterInfo> HostNetworkAdapters { get; set; } = [];
+
+        public List<VmNetworkAdapterCacheEntry> VmNetworkAdapters { get; set; } = [];
+
+        public List<VmCheckpointCacheEntry> VmCheckpoints { get; set; } = [];
+    }
+
+    private sealed class VmNetworkAdapterCacheEntry
+    {
+        public string VmName { get; set; } = string.Empty;
+
+        public DateTimeOffset CachedAtUtc { get; set; } = DateTimeOffset.MinValue;
+
+        public List<HyperVVmNetworkAdapterInfo> Adapters { get; set; } = [];
+    }
+
+    private sealed class VmCheckpointCacheEntry
+    {
+        public string VmName { get; set; } = string.Empty;
+
+        public DateTimeOffset CachedAtUtc { get; set; } = DateTimeOffset.MinValue;
+
+        public List<HyperVCheckpointInfo> Checkpoints { get; set; } = [];
+    }
+
+    private static HyperVCheckpointInfo CloneCheckpointInfo(HyperVCheckpointInfo source)
+    {
+        return new HyperVCheckpointInfo
+        {
+            Id = source.Id,
+            ParentId = source.ParentId,
+            IsCurrent = source.IsCurrent,
+            Name = source.Name,
+            Description = source.Description,
+            Created = source.Created,
+            Type = source.Type
+        };
     }
 }

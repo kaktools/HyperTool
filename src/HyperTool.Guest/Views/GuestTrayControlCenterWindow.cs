@@ -230,6 +230,11 @@ internal sealed class GuestTrayControlCenterWindow : Window
     {
         var overview = networkOverview ?? new GuestVmNetworkOverviewResult();
         var adapters = overview.Adapters ?? [];
+        var dedupedAdapters = adapters
+            .Where(adapter => !string.IsNullOrWhiteSpace((adapter.Name ?? string.Empty).Trim()))
+            .GroupBy(adapter => (adapter.Name ?? string.Empty).Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
         var switches = overview.Switches ?? [];
 
         var vmName = string.IsNullOrWhiteSpace(overview.VmName) ? "-" : overview.VmName.Trim();
@@ -241,7 +246,7 @@ internal sealed class GuestTrayControlCenterWindow : Window
         }
         else if (overview.Success)
         {
-            _networkStatusText.Text = $"{adapters.Count} Adapter · {switches.Count} Switches";
+            _networkStatusText.Text = $"{dedupedAdapters.Count} Adapter · {switches.Count} Switches";
         }
         else
         {
@@ -250,7 +255,7 @@ internal sealed class GuestTrayControlCenterWindow : Window
                 : overview.Message.Trim();
         }
 
-        var adapterRenderKey = string.Join('|', adapters.Select(item => $"{item.Name}:{item.SwitchName}"));
+        var adapterRenderKey = string.Join('|', dedupedAdapters.Select(item => $"{item.Name}:{item.SwitchName}"));
         if (!string.Equals(_lastNetworkRenderKey, adapterRenderKey, StringComparison.Ordinal))
         {
             _lastNetworkRenderKey = adapterRenderKey;
@@ -258,7 +263,7 @@ internal sealed class GuestTrayControlCenterWindow : Window
             try
             {
                 _networkAdapterCombo.Items.Clear();
-                foreach (var adapter in adapters)
+                foreach (var adapter in dedupedAdapters)
                 {
                     var adapterName = (adapter.Name ?? string.Empty).Trim();
                     if (string.IsNullOrWhiteSpace(adapterName))
@@ -316,10 +321,12 @@ internal sealed class GuestTrayControlCenterWindow : Window
             }
         }
 
-        _networkAdapterCombo.IsEnabled = !isNetworkBusy && _networkAdapterCombo.Items.Count > 1 && overview.Success;
+        var showAdapterSelection = overview.Success;
+        _networkAdapterCombo.Visibility = showAdapterSelection ? Visibility.Visible : Visibility.Collapsed;
+        _networkAdapterCombo.IsEnabled = showAdapterSelection && !isNetworkBusy && _networkAdapterCombo.Items.Count > 1;
         _networkRefreshButton.IsEnabled = !isNetworkBusy;
 
-        var selectedAdapter = adapters.FirstOrDefault(adapter =>
+        var selectedAdapter = dedupedAdapters.FirstOrDefault(adapter =>
             string.Equals((adapter.Name ?? string.Empty).Trim(), (_networkAdapterCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString(), StringComparison.OrdinalIgnoreCase));
 
         _switchChipPanel.Children.Clear();

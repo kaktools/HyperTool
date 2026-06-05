@@ -4,11 +4,10 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.6.6**
-- USB-Share-Workflow zwischen Host und Guest weiter verbessert: stabilere Share/Unshare/Detach-Abläufe und konsistentere Aktualisierung in Hauptfenster und Tray.
-- Neue Netzwerk-Switch-Funktion im Guest-Tasktray: Adapter auswählen, Switch direkt umstellen und Status sofort im Guest nachziehen.
-- Netzwerkaktionen bei vielen Hyper-V-VMs deutlich beschleunigt (schnelleres Laden, Umschalten und Aktualisieren).
-- Start-/Installationspfade für verwaltete Unternehmensumgebungen weiterhin gehärtet.
+- Version: **v2.6.7**
+- USB-Funktionalität zwischen Host und Guest wurde umfassend überarbeitet (stabilere Connect-/Attach-Abläufe, weniger Refresh-Flapping).
+- Anzeige-Fixes im Bereich Netzwerkadapter (Host/Guest), inklusive robusterem Lade- und Sync-Verhalten.
+- Allgemeine Stabilitätsverbesserungen in Startup-, Push- und Shutdown-Pfaden.
 
 ## Projekte
 
@@ -109,6 +108,14 @@ Relevante UI-Schalter:
 - ui.theme
 - ui.restoreNumLockAfterVmStart
 
+Guest-Feature-Schalter (direkt in der Guest-Konfiguration):
+
+- usb.enabled: USB-Funktion im Guest an/aus (inkl. Auto-Refresh, Push-Subscriber, USB-ACK/Heartbeat)
+- usb.backgroundCommunicationEnabled: aggressive USB-Hintergrundkommunikation (Auto-Refresh/ACK/Heartbeat) an/aus; bei false bleibt eine leichte event-basierte Host-Änderungssynchronisierung aktiv
+- sharedFolders.enabled: Shared-Folder-Funktion im Guest an/aus (inkl. Auto-Mount/Reconnect)
+- monitoring.enabled: Guest Resource-Monitor-Agent an/aus
+- network.enabled: Guest Netzwerk/Switch-Steuerung Richtung Host an/aus
+
 Versteckte/erweiterte Option (nur per `HyperTool.config.json`):
 
 - ui.numLockWatcherIntervalSeconds (Default: `30`, Bereich: `5..600`)
@@ -130,6 +137,24 @@ Konfigurationsblock in `%ProgramData%/HyperTool/HyperTool.Guest.json`:
   "enabled": true,
   "mappingMode": "hypertool-file",
   "preferHyperVSocket": true
+}
+```
+
+Optionale Isolations-Konfiguration (Troubleshooting), um Hintergrundkommunikation gezielt abzuschalten:
+
+```json
+"usb": {
+  "enabled": true,
+  "backgroundCommunicationEnabled": false
+},
+"sharedFolders": {
+  "enabled": false
+},
+"monitoring": {
+  "enabled": false
+},
+"network": {
+  "enabled": false
 }
 ```
 

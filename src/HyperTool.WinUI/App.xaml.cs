@@ -16,6 +16,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -31,10 +32,17 @@ namespace HyperTool.WinUI;
 
 public sealed partial class App : Application
 {
-    private const int HostUsbAutoRefreshSeconds = 5;
+    private const string CurrentHostWhatsNewNoticeVersion = "2026-06-usb-network-stability-v1";
+    private const int HostUsbAutoRefreshFastSeconds = 2;
+    private const int HostUsbAutoRefreshSlowSeconds = 3;
     private static readonly TimeSpan HostHyperVMonitorHeartbeatInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan HostUsbTunnelSelfHealBackoff = TimeSpan.FromSeconds(20);
-    private const int UsbDisconnectDebounceMilliseconds = 1500;
+    private static readonly TimeSpan UsbDiagnosticsRefreshDebounceInterval = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan UsbPushBroadcastMinInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan UsbTrayStateRefreshDebounceInterval = TimeSpan.FromMilliseconds(700);
+    private static readonly TimeSpan HostUsbRefreshEventDebounceInterval = TimeSpan.FromMilliseconds(320);
+    private static readonly TimeSpan HostUsbRefreshThrottleInterval = TimeSpan.FromMilliseconds(320);
+    private const int UsbDisconnectDebounceMilliseconds = 3500;
     private const string SingleInstanceMutexName = @"Local\HyperTool.WinUI.SingleInstance";
     private const string SingleInstancePipeName = "HyperTool.WinUI.SingleInstance.Activate";
     private static readonly (string ServiceId, string ElementName)[] RequiredHyperVSocketServices =
@@ -58,7 +66,12 @@ public sealed partial class App : Application
     private bool _singleInstanceOwned;
     private bool _pendingSingleInstanceShow;
     private bool _isThemeWindowReopenInProgress;
-    private bool _usbShutdownCleanupDone;
+    private int _usbShutdownCleanupStarted;
+    private readonly object _sessionEndingHookSync = new();
+    private bool _sessionEndingHookRegistered;
+    private int _sessionEndingExitStarted;
+    private int _sessionEndingCleanupStarted;
+    private int _sessionEndingShutdownBlockActive;
     private HyperVSocketUsbHostTunnel? _usbHostTunnel;
     private HyperVSocketDiagnosticsHostListener? _usbDiagnosticsHostListener;
     private HyperVSocketSharedFolderCatalogHostListener? _sharedFolderCatalogHostListener;
@@ -89,6 +102,7 @@ public sealed partial class App : Application
     private DateTimeOffset? _sharedFolderFileServiceLastActivityUtc;
     private readonly object _usbDisconnectDebounceSync = new();
     private readonly Dictionary<string, CancellationTokenSource> _pendingUsbDisconnectDebounceByKey = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _lastUsbDiagnosticsRefreshTriggerByKey = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _lastHostUsbTunnelSelfHealAttemptUtc = DateTimeOffset.MinValue;
     private int _hostUsbTunnelSelfHealFailureCount;
     private DateTimeOffset _suppressHostUsbTunnelSelfHealUntilUtc = DateTimeOffset.MinValue;
@@ -102,6 +116,8 @@ public sealed partial class App : Application
     private long _metricResourceMonitorLoopFailures;
     private long _metricUsbPushBroadcastAttempts;
     private long _metricUsbPushBroadcastFailures;
+    private DateTimeOffset _lastUsbPushBroadcastUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastUsbTrayStateTriggeredRefreshUtc = DateTimeOffset.MinValue;
     private DateTimeOffset? _lastDiagnosticsAckUtc;
     private string? _lastDiagnosticsAckEventType;
     private DateTimeOffset? _lastFileServiceRequestUtc;
@@ -109,6 +125,11 @@ public sealed partial class App : Application
     private object? _lastHostHyperVFailure;
     private object? _lastResourceMonitorLoopFailure;
     private object? _lastUsbPushBroadcastFailure;
+    private readonly object _usbPushBroadcastSync = new();
+    private string _pendingUsbShareStateFingerprint = string.Empty;
+    private int _usbPushBroadcastPending;
+    private int _suppressTrayStateTriggeredUsbRefresh;
+    private EventHandler? _mainViewModelTrayStateChangedHandler;
 
     private MainWindow? _mainWindow;
     private MainViewModel? _mainViewModel;
@@ -259,6 +280,7 @@ public sealed partial class App : Application
         }
 
         RegisterGlobalExceptionHandlers();
+        RegisterSessionEndingHook();
 
         try
         {
@@ -270,7 +292,7 @@ public sealed partial class App : Application
             var logPath = InitializeLogging(configResult.Config.Ui.DebugLoggingEnabled);
             Log.Information("Logging initialized at {LogPath}", logPath);
             Log.Information(
-                "Startup marker: BuildProfile=FullNetworkCrudEnabled; ExePath={ExePath}; ProcessPath={ProcessPath}",
+                "Startup marker: BuildProfile=FullNetworkCrudEnabled; UsbDetachGuardRev=NoVmOffStaleDetachV2; ExePath={ExePath}; ProcessPath={ProcessPath}",
                 Process.GetCurrentProcess().MainModule?.FileName ?? "<unknown>",
                 Environment.ProcessPath ?? "<unknown>");
             Log.Debug("Host configuration loaded. ConfigPath={ConfigPath}; DebugLoggingEnabled={DebugLoggingEnabled}", configResult.ConfigPath, configResult.Config.Ui.DebugLoggingEnabled);
@@ -326,6 +348,7 @@ public sealed partial class App : Application
                 updateService,
                 usbIpService,
                 uiInteropService);
+            AttachMainViewModelTrayStateRefreshHook(_mainViewModel);
 
             StartSharedFolderCatalogListenerWithRecovery();
             StartHostIdentityListenerWithRecovery();
@@ -356,7 +379,9 @@ public sealed partial class App : Application
             _trayControlCenterService = null;
             TryInitializeTray(_mainWindow, _mainViewModel);
 
-            if (configResult.Config.Ui.StartMinimized && _isTrayFunctional && !shouldForceShowFromSecondLaunch)
+            var startHiddenInTray = configResult.Config.Ui.StartMinimized && _isTrayFunctional && !shouldForceShowFromSecondLaunch;
+
+            if (startHiddenInTray)
             {
                 _mainWindow.ForceDismissStartupSplash();
                 _mainWindow.AppWindow.Hide();
@@ -366,6 +391,12 @@ public sealed partial class App : Application
                 _mainWindow.Activate();
             }
 
+            await TryShowHostVersionInfoOnFirstStartAsync(
+                configResult.Config,
+                configService,
+                configResult.ConfigPath,
+                canShowDialog: !startHiddenInTray);
+
             _ = RefreshHostUsbDevicesSafeAsync();
 
             Log.Information("Config loaded from {ConfigPath}", configResult.ConfigPath);
@@ -374,6 +405,181 @@ public sealed partial class App : Application
         catch (Exception ex)
         {
             ShowFatalErrorAndExit(ex, "HyperTool konnte beim Start nicht initialisiert werden.");
+        }
+    }
+
+    private async Task TryShowHostVersionInfoOnFirstStartAsync(
+        HyperToolConfig config,
+        IConfigService configService,
+        string configPath,
+        bool canShowDialog)
+    {
+        if (config is null)
+        {
+            return;
+        }
+
+        var currentVersion = ResolveCurrentApplicationVersion();
+        if (string.IsNullOrWhiteSpace(currentVersion))
+        {
+            return;
+        }
+
+        var previousVersion = (config.LastSeenHostToolVersion ?? string.Empty).Trim();
+        var lastSeenNoticeVersion = (config.LastSeenHostWhatsNewNoticeVersion ?? string.Empty).Trim();
+        var shouldShowWhatsNewNotice = !string.Equals(
+            lastSeenNoticeVersion,
+            CurrentHostWhatsNewNoticeVersion,
+            StringComparison.OrdinalIgnoreCase);
+
+        var versionChanged = !string.Equals(previousVersion, currentVersion, StringComparison.OrdinalIgnoreCase);
+        if (!versionChanged && !shouldShowWhatsNewNotice)
+        {
+            return;
+        }
+
+        var previousVersionForDisplay = string.IsNullOrWhiteSpace(previousVersion)
+            ? "(keine gespeicherte Vorversion)"
+            : previousVersion;
+
+        if (!canShowDialog)
+        {
+            Log.Information(
+                "Host update info dialog deferred because no visible window is available. PreviousVersion={PreviousVersion}; CurrentVersion={CurrentVersion}",
+                previousVersionForDisplay,
+                currentVersion);
+            return;
+        }
+
+        var hostContent = await WaitForMainWindowXamlRootAsync();
+        if (hostContent?.XamlRoot is null)
+        {
+            Log.Information(
+                "Host update info dialog deferred because XamlRoot is not ready yet. PreviousVersion={PreviousVersion}; CurrentVersion={CurrentVersion}",
+                previousVersionForDisplay,
+                currentVersion);
+            return;
+        }
+
+        var releaseUrl = BuildReleaseNotesUrl(config);
+        var infoLines = string.Join("\n", new[]
+        {
+            $"Neue Version erkannt: {currentVersion}",
+            $"Vorherige Version: {previousVersionForDisplay}",
+            string.Empty,
+            "Wichtige Hinweise:",
+            "- USB-Funktionalität wurde umfassend überarbeitet.",
+            "- Darstellungs-Fixes im Bereich Anzeige der Netzwerkadapter.",
+            "- Allgemeine Stabilitätsverbesserungen."
+        });
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = hostContent.XamlRoot,
+            Title = "HyperTool wurde aktualisiert",
+            Content = infoLines,
+            PrimaryButtonText = "Release Notes öffnen",
+            CloseButtonText = "Schließen",
+            DefaultButton = ContentDialogButton.Primary
+        };
+
+        try
+        {
+            var result = await dialog.ShowAsync();
+            if (result == ContentDialogResult.Primary)
+            {
+                TryOpenUrl(releaseUrl);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Could not show host update info dialog.");
+            return;
+        }
+
+        config.LastSeenHostToolVersion = currentVersion;
+        config.LastSeenHostWhatsNewNoticeVersion = CurrentHostWhatsNewNoticeVersion;
+        if (!configService.TrySave(configPath, config, out var errorMessage) && !string.IsNullOrWhiteSpace(errorMessage))
+        {
+            Log.Warning("Could not persist host tool version marker after update info dialog. Error={Error}", errorMessage);
+        }
+    }
+
+    private async Task<FrameworkElement?> WaitForMainWindowXamlRootAsync()
+    {
+        for (var attempt = 0; attempt < 12; attempt++)
+        {
+            if (_mainWindow?.Content is FrameworkElement hostContent && hostContent.XamlRoot is not null)
+            {
+                return hostContent;
+            }
+
+            await Task.Delay(120);
+        }
+
+        return null;
+    }
+
+    private static string ResolveCurrentApplicationVersion()
+    {
+        try
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            var informational = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (!string.IsNullOrWhiteSpace(informational))
+            {
+                return informational.Split('+')[0].Trim();
+            }
+
+            var executablePath = Environment.ProcessPath;
+            if (!string.IsNullOrWhiteSpace(executablePath))
+            {
+                var fileVersion = FileVersionInfo.GetVersionInfo(executablePath).FileVersion;
+                if (!string.IsNullOrWhiteSpace(fileVersion))
+                {
+                    return fileVersion.Trim();
+                }
+            }
+
+            var assemblyVersion = assembly.GetName().Version?.ToString();
+            return string.IsNullOrWhiteSpace(assemblyVersion) ? string.Empty : assemblyVersion.Trim();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string BuildReleaseNotesUrl(HyperToolConfig config)
+    {
+        var owner = config.Update?.GitHubOwner?.Trim();
+        var repo = config.Update?.GitHubRepo?.Trim();
+
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo))
+        {
+            return "https://github.com/KaKTools/HyperTool/releases";
+        }
+
+        return $"https://github.com/{owner}/{repo}/releases";
+    }
+
+    private static void TryOpenUrl(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
         }
     }
 
@@ -399,6 +605,8 @@ public sealed partial class App : Application
 
             if (!_isTrayFunctional || !_minimizeToTray)
             {
+                _isExitRequested = true;
+                StopBackgroundOperationsForExit();
                 return;
             }
 
@@ -419,6 +627,10 @@ public sealed partial class App : Application
             {
                 return;
             }
+
+            _isExitRequested = true;
+            StopBackgroundOperationsForExit();
+            UnregisterSessionEndingHook();
 
             await ExecuteUsbShutdownCleanupAsync();
 
@@ -1857,6 +2069,70 @@ public sealed partial class App : Application
         }
     }
 
+    private void AttachMainViewModelTrayStateRefreshHook(MainViewModel mainViewModel)
+    {
+        DetachMainViewModelTrayStateRefreshHook();
+
+        _mainViewModelTrayStateChangedHandler = (_, _) =>
+        {
+            try
+            {
+                if (_isExitRequested || _isThemeWindowReopenInProgress)
+                {
+                    return;
+                }
+
+                if (Volatile.Read(ref _suppressTrayStateTriggeredUsbRefresh) > 0)
+                {
+                    return;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                if ((now - _lastUsbTrayStateTriggeredRefreshUtc) < UsbTrayStateRefreshDebounceInterval)
+                {
+                    return;
+                }
+
+                _lastUsbTrayStateTriggeredRefreshUtc = now;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await RefreshHostUsbDevicesSafeAsync(force: false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Debug(ex, "Host USB refresh after tray-state change failed.");
+                    }
+                });
+            }
+            catch
+            {
+            }
+        };
+
+        mainViewModel.TrayStateChanged += _mainViewModelTrayStateChangedHandler;
+    }
+
+    private void DetachMainViewModelTrayStateRefreshHook()
+    {
+        if (_mainViewModelTrayStateChangedHandler is null || _mainViewModel is null)
+        {
+            _mainViewModelTrayStateChangedHandler = null;
+            return;
+        }
+
+        try
+        {
+            _mainViewModel.TrayStateChanged -= _mainViewModelTrayStateChangedHandler;
+        }
+        catch
+        {
+        }
+
+        _mainViewModelTrayStateChangedHandler = null;
+    }
+
     private static void EnqueueMainWindowAction(MainWindow mainWindow, Action action)
     {
         try
@@ -1930,6 +2206,7 @@ public sealed partial class App : Application
 
         _isExitSequenceRunning = true;
         _isExitRequested = true;
+        StopBackgroundOperationsForExit();
 
         try
         {
@@ -1991,12 +2268,17 @@ public sealed partial class App : Application
 
     private async Task ExecuteUsbShutdownCleanupAsync()
     {
-        if (_usbShutdownCleanupDone)
+        if (Interlocked.Exchange(ref _usbShutdownCleanupStarted, 1) == 1)
         {
             return;
         }
 
-        _usbShutdownCleanupDone = true;
+        if (Interlocked.CompareExchange(ref _sessionEndingExitStarted, 0, 0) == 1
+            || Environment.HasShutdownStarted
+            || AppDomain.CurrentDomain.IsFinalizingForUnload())
+        {
+            Log.Information("USB cleanup on shutdown running in safe mode because OS session ending is in progress.");
+        }
 
         if (_mainViewModel is null)
         {
@@ -2011,11 +2293,195 @@ public sealed partial class App : Application
 
         try
         {
-            await _mainViewModel.UnshareAllSharedUsbOnShutdownAsync();
+            var detachOnly = Interlocked.CompareExchange(ref _sessionEndingExitStarted, 0, 0) == 1
+                || Environment.HasShutdownStarted;
+            await _mainViewModel.UnshareAllSharedUsbOnShutdownAsync(detachOnlyDuringSessionEnding: detachOnly);
         }
         catch (Exception ex)
         {
             Log.Warning(ex, "USB cleanup on shutdown failed.");
+        }
+    }
+
+    private void StopBackgroundOperationsForExit()
+    {
+        DetachMainViewModelTrayStateRefreshHook();
+        StopUsbEventRefreshScheduling();
+        StopUsbAutoRefreshLoop();
+        StopUsbDiagnosticsLoop();
+        StopUsbHostDiscoveryResponder();
+        StopHostHyperVMonitorLoop();
+        StopResourceMonitorLoop();
+
+        lock (_usbDisconnectDebounceSync)
+        {
+            foreach (var cts in _pendingUsbDisconnectDebounceByKey.Values)
+            {
+                try
+                {
+                    cts.Cancel();
+                }
+                catch
+                {
+                }
+
+                cts.Dispose();
+            }
+
+            _pendingUsbDisconnectDebounceByKey.Clear();
+        }
+    }
+
+    private void RegisterSessionEndingHook()
+    {
+        lock (_sessionEndingHookSync)
+        {
+            if (_sessionEndingHookRegistered)
+            {
+                return;
+            }
+
+            try
+            {
+                SystemEvents.SessionEnding += OnSystemSessionEnding;
+                _sessionEndingHookRegistered = true;
+                Log.Debug("Windows SessionEnding-Hook registriert (Host).");
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Windows SessionEnding-Hook konnte nicht registriert werden (Host).");
+            }
+        }
+    }
+
+    private void UnregisterSessionEndingHook()
+    {
+        lock (_sessionEndingHookSync)
+        {
+            if (!_sessionEndingHookRegistered)
+            {
+                return;
+            }
+
+            try
+            {
+                SystemEvents.SessionEnding -= OnSystemSessionEnding;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Windows SessionEnding-Hook konnte nicht deregistriert werden (Host).");
+            }
+
+            _sessionEndingHookRegistered = false;
+        }
+    }
+
+    private void OnSystemSessionEnding(object? sender, SessionEndingEventArgs e)
+    {
+        if (Interlocked.Exchange(ref _sessionEndingExitStarted, 1) == 1)
+        {
+            return;
+        }
+
+        _isExitRequested = true;
+
+        try
+        {
+            StopBackgroundOperationsForExit();
+            Log.Information("Windows SessionEnding erkannt. Hintergrund-Loops gestoppt. Reason={Reason}", e.Reason);
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Stoppen der Hintergrund-Loops bei SessionEnding fehlgeschlagen.");
+        }
+
+        if (Interlocked.Exchange(ref _sessionEndingCleanupStarted, 1) == 1)
+        {
+            return;
+        }
+
+        var shutdownBlockEnabled = TryEnableShutdownBlockReason("HyperTool trennt USB-Verbindungen vor dem Herunterfahren …");
+        try
+        {
+            var cleanupTask = Task.Run(ExecuteUsbShutdownCleanupAsync);
+            if (!cleanupTask.Wait(TimeSpan.FromSeconds(12)))
+            {
+                Log.Warning("USB cleanup during SessionEnding reached timeout window.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "USB cleanup during SessionEnding failed.");
+        }
+        finally
+        {
+            if (shutdownBlockEnabled)
+            {
+                TryDisableShutdownBlockReason();
+            }
+        }
+    }
+
+    private bool TryEnableShutdownBlockReason(string reason)
+    {
+        if (_mainWindow is null)
+        {
+            return false;
+        }
+
+        if (Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 1) == 1)
+        {
+            return true;
+        }
+
+        try
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
+            if (hwnd == nint.Zero)
+            {
+                Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
+                return false;
+            }
+
+            var created = ShutdownBlockReasonCreate(hwnd, reason);
+            if (!created)
+            {
+                Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
+                return false;
+            }
+
+            Log.Debug("Windows shutdown temporarily blocked to finish USB cleanup. Reason={Reason}", reason);
+            return true;
+        }
+        catch
+        {
+            Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
+            return false;
+        }
+    }
+
+    private void TryDisableShutdownBlockReason()
+    {
+        if (_mainWindow is null)
+        {
+            Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
+            return;
+        }
+
+        try
+        {
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_mainWindow);
+            if (hwnd != nint.Zero)
+            {
+                _ = ShutdownBlockReasonDestroy(hwnd);
+            }
+        }
+        catch
+        {
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _sessionEndingShutdownBlockActive, 0);
         }
     }
 
@@ -2147,9 +2613,15 @@ public sealed partial class App : Application
         _usbEventRefreshCts = null;
     }
 
-    private void TriggerHostUsbRefreshForDiagnosticsEvent()
+    private void TriggerHostUsbRefreshForDiagnosticsEvent(string eventType, string? busId, string? hardwareId, string? sourceVmId, string? guestComputerName)
     {
-        _ = RefreshHostUsbDevicesSafeAsync(force: false);
+        Log.Debug(
+            "trace.host.usb_refresh.schedule EventType={EventType}; BusId={BusId}; HardwareId={HardwareId}; SourceVmId={SourceVmId}; GuestComputerName={GuestComputerName}",
+            eventType,
+            busId,
+            hardwareId,
+            sourceVmId,
+            guestComputerName);
 
         try
         {
@@ -2167,12 +2639,14 @@ public sealed partial class App : Application
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(2), refreshToken);
-                await RefreshHostUsbDevicesSafeAsync(force: true);
-
-                // Second pass: gives detach/unshare transitions more time to settle
-                // before the push-notification fingerprint is evaluated.
-                await Task.Delay(TimeSpan.FromSeconds(3), refreshToken);
+                await Task.Delay(HostUsbRefreshEventDebounceInterval, refreshToken);
+                Log.Debug(
+                    "trace.host.usb_refresh.execute EventType={EventType}; BusId={BusId}; HardwareId={HardwareId}; SourceVmId={SourceVmId}; GuestComputerName={GuestComputerName}",
+                    eventType,
+                    busId,
+                    hardwareId,
+                    sourceVmId,
+                    guestComputerName);
                 await RefreshHostUsbDevicesSafeAsync(force: true);
             }
             catch (OperationCanceledException)
@@ -2195,20 +2669,28 @@ public sealed partial class App : Application
         }
 
         var now = DateTimeOffset.UtcNow;
-        if (!force && (now - _lastHostUsbRefreshUtc) < TimeSpan.FromMilliseconds(1200))
+        if (!force && (now - _lastHostUsbRefreshUtc) < HostUsbRefreshThrottleInterval)
         {
             return;
         }
 
         if (!await _hostUsbRefreshGate.WaitAsync(0))
         {
-            Interlocked.Exchange(ref _hostUsbRefreshReplayRequested, 1);
+            // Avoid replay storms from periodic background ticks while a long refresh is running.
+            // Only forced callers (diagnostics/manual critical paths) request a replay.
+            if (force)
+            {
+                Interlocked.Exchange(ref _hostUsbRefreshReplayRequested, 1);
+            }
+
             return;
         }
 
         try
         {
+            Log.Debug("trace.host.usb_refresh.begin Force={Force}; LastRefreshUtc={LastRefreshUtc}", force, _lastHostUsbRefreshUtc);
             string? newFingerprint = null;
+            Interlocked.Increment(ref _suppressTrayStateTriggeredUsbRefresh);
 
             if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
             {
@@ -2246,21 +2728,19 @@ public sealed partial class App : Application
 
             _lastHostUsbRefreshUtc = DateTimeOffset.UtcNow;
 
-            if (newFingerprint is not null
-                && !string.Equals(newFingerprint, _lastUsbShareStateFingerprint, StringComparison.Ordinal)
-                && _usbChangeNotificationHostListener?.SubscriberCount > 0)
+            Log.Debug("trace.host.usb_refresh.done Force={Force}; FingerprintChanged={FingerprintChanged}; SubscriberCount={SubscriberCount}",
+                force,
+                newFingerprint is not null && !string.Equals(newFingerprint, _lastUsbShareStateFingerprint, StringComparison.Ordinal),
+                _usbChangeNotificationHostListener?.SubscriberCount ?? 0);
+
+            if (!string.IsNullOrWhiteSpace(newFingerprint))
             {
-                _lastUsbShareStateFingerprint = newFingerprint;
-                Log.Debug("USB share state changed - notifying guest subscribers via push channel.");
-                _ = BroadcastUsbChangeNotificationAsync();
-            }
-            else if (newFingerprint is not null && !string.Equals(newFingerprint, _lastUsbShareStateFingerprint, StringComparison.Ordinal))
-            {
-                _lastUsbShareStateFingerprint = newFingerprint;
+                _ = TryScheduleUsbPushBroadcastForFingerprint(newFingerprint, "host-refresh");
             }
         }
         finally
         {
+            Interlocked.Decrement(ref _suppressTrayStateTriggeredUsbRefresh);
             _hostUsbRefreshGate.Release();
 
             if (Interlocked.Exchange(ref _hostUsbRefreshReplayRequested, 0) == 1)
@@ -2310,6 +2790,99 @@ public sealed partial class App : Application
         }
     }
 
+    private bool TryScheduleUsbPushBroadcastForCurrentSnapshot(string source)
+    {
+        var fingerprint = ComputeUsbShareFingerprint();
+        if (string.IsNullOrWhiteSpace(fingerprint))
+        {
+            return false;
+        }
+
+        return TryScheduleUsbPushBroadcastForFingerprint(fingerprint, source);
+    }
+
+    private bool TryScheduleUsbPushBroadcastForFingerprint(string fingerprint, string source)
+    {
+        if (string.IsNullOrWhiteSpace(fingerprint))
+        {
+            return false;
+        }
+
+        TimeSpan? deferredDelay = null;
+        var shouldBroadcastNow = false;
+
+        lock (_usbPushBroadcastSync)
+        {
+            if (string.Equals(fingerprint, _lastUsbShareStateFingerprint, StringComparison.Ordinal))
+            {
+                // State returned to the already broadcast baseline (e.g. quick lock/unlock);
+                // drop any stale deferred fingerprint so we do not broadcast an outdated snapshot.
+                _pendingUsbShareStateFingerprint = string.Empty;
+                return false;
+            }
+
+            var nowUtc = DateTimeOffset.UtcNow;
+            var elapsedSinceLastBroadcast = nowUtc - _lastUsbPushBroadcastUtc;
+            if (elapsedSinceLastBroadcast >= UsbPushBroadcastMinInterval)
+            {
+                _lastUsbShareStateFingerprint = fingerprint;
+                _lastUsbPushBroadcastUtc = nowUtc;
+                _pendingUsbShareStateFingerprint = string.Empty;
+                shouldBroadcastNow = true;
+            }
+            else
+            {
+                _pendingUsbShareStateFingerprint = fingerprint;
+                deferredDelay = UsbPushBroadcastMinInterval - elapsedSinceLastBroadcast;
+            }
+        }
+
+        if (shouldBroadcastNow)
+        {
+            Log.Debug("USB share state changed - notifying guest subscribers via push channel. Source={Source}", source);
+            _ = BroadcastUsbChangeNotificationAsync();
+            return true;
+        }
+
+        if (deferredDelay.HasValue
+            && Interlocked.CompareExchange(ref _usbPushBroadcastPending, 1, 0) == 0)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(deferredDelay.Value + TimeSpan.FromMilliseconds(50));
+                    FlushPendingUsbPushBroadcast("deferred");
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug(ex, "Deferred USB push broadcast scheduling failed.");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _usbPushBroadcastPending, 0);
+                }
+            });
+        }
+
+        return false;
+    }
+
+    private void FlushPendingUsbPushBroadcast(string source)
+    {
+        string fingerprint;
+        lock (_usbPushBroadcastSync)
+        {
+            fingerprint = _pendingUsbShareStateFingerprint;
+            _pendingUsbShareStateFingerprint = string.Empty;
+        }
+
+        if (!string.IsNullOrWhiteSpace(fingerprint))
+        {
+            _ = TryScheduleUsbPushBroadcastForFingerprint(fingerprint, source);
+        }
+    }
+
     private string ComputeUsbShareFingerprint()
     {
         if (_mainViewModel is null)
@@ -2320,7 +2893,20 @@ public sealed partial class App : Application
         var deviceParts = _mainViewModel.UsbDevices
             .Where(d => !string.IsNullOrWhiteSpace(d.BusId))
             .OrderBy(d => d.BusId, StringComparer.OrdinalIgnoreCase)
-            .Select(d => $"{d.BusId}:{d.IsShared}:{d.IsAttached}")
+            .Select(d => string.Concat(
+                d.BusId,
+                ":",
+                d.IsShared,
+                ":",
+                d.IsAttached,
+                ":",
+                d.IsConnected,
+                ":",
+                (d.HardwareIdentityKey ?? d.HardwareId ?? string.Empty).Trim().ToUpperInvariant(),
+                ":",
+                (d.InstanceId ?? string.Empty).Trim().ToUpperInvariant(),
+                ":",
+                (d.Description ?? string.Empty).Trim()))
             .ToArray();
 
         var metadataParts = _mainViewModel.GetUsbDeviceMetadataSnapshot()
@@ -2345,12 +2931,27 @@ public sealed partial class App : Application
 
     private void ProcessDiagnosticsAck(HyperVSocketDiagnosticsAck ack, bool isThemeRestart)
     {
+        var eventType = (ack.EventType ?? string.Empty).Trim();
+        var isUsbConnectionEvent = string.Equals(eventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(eventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(eventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(eventType, "usb-export-stale-suspect", StringComparison.OrdinalIgnoreCase);
+
         lock (_hostHyperVMetricsSync)
         {
             _metricDiagnosticsAckReceived++;
             _lastDiagnosticsAckUtc = DateTimeOffset.UtcNow;
             _lastDiagnosticsAckEventType = ack.EventType;
         }
+
+        Log.Debug(
+            "trace.host.diagnostics_ack EventType={EventType}; BusId={BusId}; HardwareId={HardwareId}; GuestComputerName={GuestComputerName}; SourceVmId={SourceVmId}; IsUsbConnectionEvent={IsUsbConnectionEvent}",
+            ack.EventType,
+            ack.BusId,
+            ack.HardwareId,
+            ack.GuestComputerName,
+            ack.SourceVmId,
+            isUsbConnectionEvent);
 
         try
         {
@@ -2362,37 +2963,41 @@ public sealed partial class App : Application
             Log.Warning(ex, "Diagnostics ack registry update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
         }
 
-        try
+        if (!isUsbConnectionEvent)
         {
-            if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
+            try
             {
-                _ = queue.TryEnqueue(() =>
+                if (_mainWindow?.DispatcherQueue is { } queue && !queue.HasThreadAccess)
                 {
-                    try
+                    _ = queue.TryEnqueue(() =>
                     {
-                        GuestNetworkDiagnosticsRegistry.UpdateFromDiagnosticsAck(ack);
-                        _mainViewModel?.RefreshVmNetworkDiagnosticsFromRegistry();
-                    }
-                    catch (Exception ex)
-                    {
-                        TrackHostHyperVFailure("diagnostics-ack.network-update-dispatch", ex);
-                        Log.Warning(ex, "Diagnostics ack network update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
-                    }
-                });
+                        try
+                        {
+                            GuestNetworkDiagnosticsRegistry.UpdateFromDiagnosticsAck(ack);
+                            _mainViewModel?.RefreshVmNetworkDiagnosticsFromRegistry();
+                        }
+                        catch (Exception ex)
+                        {
+                            TrackHostHyperVFailure("diagnostics-ack.network-update-dispatch", ex);
+                            Log.Warning(ex, "Diagnostics ack network update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
+                        }
+                    });
+                }
+                else
+                {
+                    GuestNetworkDiagnosticsRegistry.UpdateFromDiagnosticsAck(ack);
+                    _mainViewModel?.RefreshVmNetworkDiagnosticsFromRegistry();
+                }
             }
-            else
+            catch (Exception ex)
             {
-                GuestNetworkDiagnosticsRegistry.UpdateFromDiagnosticsAck(ack);
-                _mainViewModel?.RefreshVmNetworkDiagnosticsFromRegistry();
+                TrackHostHyperVFailure("diagnostics-ack.network-update", ex);
+                Log.Warning(ex, "Diagnostics ack network update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
             }
-        }
-        catch (Exception ex)
-        {
-            TrackHostHyperVFailure("diagnostics-ack.network-update", ex);
-            Log.Warning(ex, "Diagnostics ack network update failed. EventType={EventType}; BusId={BusId}", ack.EventType, ack.BusId);
         }
 
-        if (_mainViewModel is not null
+        if (!isUsbConnectionEvent
+            && _mainViewModel is not null
             && !string.IsNullOrWhiteSpace(ack.GuestComputerName)
             && ack.GuestCpuPercent.HasValue
             && ack.GuestRamUsedGb.HasValue
@@ -2445,28 +3050,31 @@ public sealed partial class App : Application
 
         if (_mainViewModel is not null
             && (!string.IsNullOrWhiteSpace(ack.BusId) || !string.IsNullOrWhiteSpace(ack.HardwareId))
-            && string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
+            && string.Equals(eventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase))
         {
-            ScheduleUsbClientDisconnectEvent(ack.BusId, ack.HardwareId);
+            ScheduleUsbClientDisconnectEvent(ack.BusId, ack.HardwareId, ack.SourceVmId, ack.GuestComputerName);
         }
 
         if (_mainViewModel is not null
             && (!string.IsNullOrWhiteSpace(ack.BusId) || !string.IsNullOrWhiteSpace(ack.HardwareId))
-            && string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase))
+            && string.Equals(eventType, "usb-connected", StringComparison.OrdinalIgnoreCase))
         {
-            CancelPendingUsbClientDisconnectEvent(ack.BusId, ack.HardwareId);
+            CancelPendingUsbClientDisconnectEvent(ack.BusId, ack.HardwareId, ack.SourceVmId, ack.GuestComputerName);
         }
 
         if (_mainViewModel is not null
             && (!string.IsNullOrWhiteSpace(ack.BusId) || !string.IsNullOrWhiteSpace(ack.HardwareId))
-            && (string.Equals(ack.EventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(ack.EventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)))
+            && (string.Equals(eventType, "usb-connected", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(eventType, "usb-disconnected", StringComparison.OrdinalIgnoreCase)))
         {
-            TriggerHostUsbRefreshForDiagnosticsEvent();
+            if (ShouldTriggerHostUsbRefreshForDiagnosticsEvent(ack))
+            {
+                TriggerHostUsbRefreshForDiagnosticsEvent(eventType, ack.BusId, ack.HardwareId, ack.SourceVmId, ack.GuestComputerName);
+            }
         }
 
-        if (!string.Equals(ack.EventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(ack.EventType, "usb-export-stale-suspect", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(eventType, "usb-heartbeat", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(eventType, "usb-export-stale-suspect", StringComparison.OrdinalIgnoreCase))
         {
             Log.Information(
                 isThemeRestart
@@ -2501,12 +3109,12 @@ public sealed partial class App : Application
         }
     }
 
-    private void ScheduleUsbClientDisconnectEvent(string? busId, string? hardwareId)
+    private void ScheduleUsbClientDisconnectEvent(string? busId, string? hardwareId, string? sourceVmId, string? guestComputerName)
     {
-        var correlationKey = BuildUsbDisconnectCorrelationKey(busId, hardwareId);
+        var correlationKey = BuildUsbDisconnectCorrelationKey(busId, hardwareId, sourceVmId, guestComputerName);
         if (string.IsNullOrWhiteSpace(correlationKey))
         {
-            _ = HandleUsbClientDisconnectEventAsync(busId, hardwareId);
+            _ = HandleUsbClientDisconnectEventAsync(busId, hardwareId, sourceVmId, guestComputerName);
             return;
         }
 
@@ -2547,7 +3155,7 @@ public sealed partial class App : Application
                 await Task.Delay(UsbDisconnectDebounceMilliseconds, cts.Token);
                 if (!cts.IsCancellationRequested)
                 {
-                    await HandleUsbClientDisconnectEventAsync(busId, hardwareId);
+                    await HandleUsbClientDisconnectEventAsync(busId, hardwareId, sourceVmId, guestComputerName);
                 }
             }
             catch (OperationCanceledException)
@@ -2573,9 +3181,9 @@ public sealed partial class App : Application
         });
     }
 
-    private void CancelPendingUsbClientDisconnectEvent(string? busId, string? hardwareId)
+    private void CancelPendingUsbClientDisconnectEvent(string? busId, string? hardwareId, string? sourceVmId, string? guestComputerName)
     {
-        var correlationKey = BuildUsbDisconnectCorrelationKey(busId, hardwareId);
+        var correlationKey = BuildUsbDisconnectCorrelationKey(busId, hardwareId, sourceVmId, guestComputerName);
         if (string.IsNullOrWhiteSpace(correlationKey))
         {
             return;
@@ -2609,19 +3217,82 @@ public sealed partial class App : Application
         }
     }
 
-    private static string BuildUsbDisconnectCorrelationKey(string? busId, string? hardwareId)
+    private static string BuildUsbDisconnectCorrelationKey(string? busId, string? hardwareId, string? sourceVmId, string? guestComputerName)
     {
+        var scope = BuildUsbDiagnosticsScope(sourceVmId, guestComputerName);
+
         if (!string.IsNullOrWhiteSpace(busId))
         {
-            return "bus:" + busId.Trim();
+            return "bus:" + busId.Trim() + "@" + scope;
         }
 
         if (!string.IsNullOrWhiteSpace(hardwareId))
         {
-            return "hw:" + NormalizeUsbHardwareIdForCorrelation(hardwareId);
+            return "hw:" + NormalizeUsbHardwareIdForCorrelation(hardwareId) + "@" + scope;
         }
 
         return string.Empty;
+    }
+
+    private static string BuildUsbDiagnosticsScope(string? sourceVmId, string? guestComputerName)
+    {
+        var normalizedSourceVmId = (sourceVmId ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(normalizedSourceVmId))
+        {
+            return "vmid:" + normalizedSourceVmId.ToLowerInvariant();
+        }
+
+        var normalizedGuestComputerName = (guestComputerName ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(normalizedGuestComputerName))
+        {
+            return "guest:" + normalizedGuestComputerName.ToLowerInvariant();
+        }
+
+        return "global";
+    }
+
+    private bool ShouldTriggerHostUsbRefreshForDiagnosticsEvent(HyperVSocketDiagnosticsAck ack)
+    {
+        var eventType = (ack.EventType ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(eventType))
+        {
+            return false;
+        }
+
+        var correlationKey = BuildUsbDisconnectCorrelationKey(ack.BusId, ack.HardwareId, ack.SourceVmId, ack.GuestComputerName);
+        if (string.IsNullOrWhiteSpace(correlationKey))
+        {
+            return true;
+        }
+
+        var dedupeKey = eventType.ToLowerInvariant() + ":" + correlationKey;
+        var now = DateTimeOffset.UtcNow;
+
+        lock (_usbDisconnectDebounceSync)
+        {
+            if (_lastUsbDiagnosticsRefreshTriggerByKey.TryGetValue(dedupeKey, out var lastTriggeredUtc)
+                && (now - lastTriggeredUtc) < UsbDiagnosticsRefreshDebounceInterval)
+            {
+                return false;
+            }
+
+            _lastUsbDiagnosticsRefreshTriggerByKey[dedupeKey] = now;
+
+            if (_lastUsbDiagnosticsRefreshTriggerByKey.Count > 128)
+            {
+                var obsoleteKeys = _lastUsbDiagnosticsRefreshTriggerByKey
+                    .Where(entry => (now - entry.Value) > TimeSpan.FromMinutes(2))
+                    .Select(entry => entry.Key)
+                    .ToList();
+
+                foreach (var key in obsoleteKeys)
+                {
+                    _lastUsbDiagnosticsRefreshTriggerByKey.Remove(key);
+                }
+            }
+        }
+
+        return true;
     }
 
     private static string NormalizeUsbHardwareIdForCorrelation(string hardwareId)
@@ -2636,7 +3307,7 @@ public sealed partial class App : Application
         return normalized.ToUpperInvariant();
     }
 
-    private async Task HandleUsbClientDisconnectEventAsync(string? busId, string? hardwareId)
+    private async Task HandleUsbClientDisconnectEventAsync(string? busId, string? hardwareId, string? sourceVmId, string? guestComputerName)
     {
         if (_mainViewModel is null
             || _isExitRequested
@@ -2653,7 +3324,7 @@ public sealed partial class App : Application
                 {
                     try
                     {
-                        await HandleUsbClientDisconnectEventAsync(busId, hardwareId);
+                        await HandleUsbClientDisconnectEventAsync(busId, hardwareId, sourceVmId, guestComputerName);
                         completion.TrySetResult(true);
                     }
                     catch (Exception ex)
@@ -2671,7 +3342,11 @@ public sealed partial class App : Application
 
         try
         {
-            await _mainViewModel.HandleUsbClientDisconnectedAsync(busId ?? string.Empty, hardwareId);
+            await _mainViewModel.HandleUsbClientDisconnectedAsync(
+                busId ?? string.Empty,
+                hardwareId,
+                sourceVmId,
+                guestComputerName);
         }
         catch (Exception ex)
         {
@@ -2685,10 +3360,12 @@ public sealed partial class App : Application
         {
             try
             {
+                var hostUsbSharingEnabled = _mainViewModel?.HostUsbSharingEnabled == true;
+
                 if (_mainViewModel is not null
                     && !_isExitRequested
                     && !_isThemeWindowReopenInProgress
-                    && !_mainViewModel.IsBusy)
+                    && hostUsbSharingEnabled)
                 {
                     await RefreshHostUsbDevicesSafeAsync();
                 }
@@ -2700,13 +3377,26 @@ public sealed partial class App : Application
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(HostUsbAutoRefreshSeconds), cancellationToken);
+                await Task.Delay(TimeSpan.FromSeconds(GetHostUsbAutoRefreshIntervalSeconds()), cancellationToken);
             }
             catch (OperationCanceledException)
             {
                 break;
             }
         }
+    }
+
+    private int GetHostUsbAutoRefreshIntervalSeconds()
+    {
+        if (_mainViewModel?.HostUsbSharingEnabled != true)
+        {
+            return HostUsbAutoRefreshSlowSeconds;
+        }
+
+        var hasActiveGuestSubscribers = (_usbChangeNotificationHostListener?.SubscriberCount ?? 0) > 0;
+        return hasActiveGuestSubscribers
+            ? HostUsbAutoRefreshFastSeconds
+            : HostUsbAutoRefreshSlowSeconds;
     }
 
     private async Task RunUsbDiagnosticsLoopAsync(CancellationToken cancellationToken)
@@ -3193,6 +3883,9 @@ public sealed partial class App : Application
             NativeMessageBoxButtons.Ok,
             NativeMessageBoxIcon.Error);
 
+        _isExitRequested = true;
+        StopBackgroundOperationsForExit();
+        UnregisterSessionEndingHook();
         ShutdownSingleInstanceInfrastructure();
         Microsoft.UI.Xaml.Application.Current.Exit();
     }
@@ -4007,7 +4700,8 @@ public sealed partial class App : Application
     {
         try
         {
-            _usbChangeNotificationHostListener = new HyperVSocketUsbChangeNotificationHostListener();
+            _usbChangeNotificationHostListener = new HyperVSocketUsbChangeNotificationHostListener(
+                usbDeviceSnapshotProvider: () => _mainViewModel?.GetUsbDevicesForGuestSnapshot() ?? []);
             _usbChangeNotificationHostListener.Start();
             Log.Information(isThemeRestart
                 ? "Hyper-V socket USB change-notification listener restarted after theme change."
@@ -4492,4 +5186,10 @@ public sealed partial class App : Application
 
     [DllImport("user32.dll")]
     private static extern bool IsIconic(nint hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ShutdownBlockReasonCreate(nint hWnd, string pwszReason);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ShutdownBlockReasonDestroy(nint hWnd);
 }

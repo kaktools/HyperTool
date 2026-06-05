@@ -1,5 +1,39 @@
 # HyperTool Release Notes
 
+## v2.6.7
+
+### Highlights
+
+- USB-Funktionalität zwischen Host und Guest wurde umfassend überarbeitet.
+- Deutlich robusteres Verhalten bei Push-/Refresh-Synchronisierung und Attach-/Auto-Connect-Abläufen.
+- Anzeige-Fixes im Bereich Netzwerkadapter in Host und Guest.
+
+### Verbessert
+
+- Guest USB-Startup:
+	- Der USB-Katalog wird beim Start schneller sichtbar aufgebaut.
+	- Startup- und Push-Refresh wurden entkoppelt, um lange Blockaden zu reduzieren.
+	- Auto-Connect-Verhalten wurde für stabilere Reihenfolge und weniger Race-Conditions überarbeitet.
+- USB-Sync Host ↔ Guest:
+	- Push-Verarbeitung und nachgelagerte Refreshes reagieren konsistenter auf schnelle Zustandswechsel.
+	- Flapping bei wiederholten Share-/Attach-Statusänderungen wurde reduziert.
+- Netzwerkadapter-Anzeige:
+	- Mehrere Darstellungs- und Synchronisationskorrekturen in Host- und Guest-Ansichten.
+	- Stabileres Nachziehen von Adapter-/Switch-Status im Tray- und UI-Kontext.
+- Host Netzwerkprofil-Umschaltung (Public/Private):
+	- Robusteres Elevation-Handling.
+	- Klarere und besser nachvollziehbare Fehlerdiagnosen.
+
+### Stabilität
+
+- Allgemeine Stabilitätsverbesserungen in Startup-, Push-, Refresh- und Shutdown-Pfaden.
+- Weniger Fehlerkaskaden bei parallelen Hintergrundaktionen und Übergangszuständen.
+
+### Doku
+
+- README auf v2.6.7 aktualisiert.
+
+
 ## v2.6.6
 
 ### Highlights

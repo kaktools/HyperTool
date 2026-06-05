@@ -8,7 +8,7 @@ namespace HyperTool.Services;
 
 public sealed class ConfigService : IConfigService
 {
-    private const int CurrentConfigSchemaVersion = 3;
+    private const int CurrentConfigSchemaVersion = 4;
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true,

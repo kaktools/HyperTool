@@ -32,14 +32,28 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
     private const int ElevatedWorkerConnectTimeoutMs = 120000;
     private const int ElevatedWorkerConnectProbeMs = 500;
     private const int ElevatedWorkerShutdownWaitMs = 1500;
+    private static readonly TimeSpan EnsureReadySuccessCacheDuration = TimeSpan.FromSeconds(12);
     private static readonly SemaphoreSlim EnsureReadyGate = new(1, 1);
+    private static readonly object EnsureReadyCacheSync = new();
+    private static DateTimeOffset _lastEnsureReadySuccessUtc = DateTimeOffset.MinValue;
     private readonly SemaphoreSlim _elevatedSessionGate = new(1, 1);
+    private int _shutdownCleanupMode;
     private NamedPipeServerStream? _elevatedSessionPipe;
     private StreamReader? _elevatedSessionReader;
     private StreamWriter? _elevatedSessionWriter;
     private Process? _elevatedSessionProcess;
     private string _elevatedSessionToken = string.Empty;
     private bool _elevatedSessionUnavailable;
+
+    public void SetShutdownCleanupMode(bool enabled)
+    {
+        Interlocked.Exchange(ref _shutdownCleanupMode, enabled ? 1 : 0);
+    }
+
+    private bool IsShutdownCleanupModeActive()
+    {
+        return Interlocked.CompareExchange(ref _shutdownCleanupMode, 0, 0) == 1;
+    }
 
     public async Task<bool> IsUsbClientAvailableAsync(CancellationToken cancellationToken)
     {
@@ -84,7 +98,7 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 
     public async Task<IReadOnlyList<UsbIpDeviceInfo>> GetDevicesAsync(CancellationToken cancellationToken)
     {
-        await EnsureReadyAsync(cancellationToken, allowElevationPrompt: false);
+        await EnsureReadyAsync(cancellationToken, allowElevationPrompt: false, allowServiceStart: !IsShutdownCleanupModeActive());
 
         // Prefer `list --json` because it typically contains the full local USB inventory
         // (including currently unshared devices). Fall back to legacy `state` for older versions.
@@ -210,11 +224,19 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
     public async Task BindAsync(string busId, bool force, CancellationToken cancellationToken)
     {
         _ = force;
-        await EnsureReadyAsync(cancellationToken);
+        var shutdownCleanupMode = IsShutdownCleanupModeActive();
+        await EnsureReadyAsync(cancellationToken, allowElevationPrompt: !shutdownCleanupMode, allowServiceStart: !shutdownCleanupMode);
         var args = new List<string> { "bind", "--busid", busId };
 
         if (!IsProcessElevated())
         {
+            if (shutdownCleanupMode)
+            {
+                var nonElevatedResult = await RunCommandAsync(args, cancellationToken);
+                EnsureSuccess(nonElevatedResult, $"USB-Gerät mit BUSID '{busId}' konnte nicht freigegeben werden.");
+                return;
+            }
+
             var exitCode = await RunCommandElevatedAsync(args, cancellationToken);
             EnsureSuccess(exitCode, $"USB-Gerät mit BUSID '{busId}' konnte nicht freigegeben werden.");
             return;
@@ -226,9 +248,17 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 
     public async Task UnbindAsync(string busId, CancellationToken cancellationToken)
     {
-        await EnsureReadyAsync(cancellationToken);
+        var shutdownCleanupMode = IsShutdownCleanupModeActive();
+        await EnsureReadyAsync(cancellationToken, allowElevationPrompt: !shutdownCleanupMode, allowServiceStart: !shutdownCleanupMode);
         if (!IsProcessElevated())
         {
+            if (shutdownCleanupMode)
+            {
+                var nonElevatedResult = await RunCommandAsync(["unbind", "--busid", busId], cancellationToken);
+                EnsureSuccess(nonElevatedResult, $"USB-Freigabe für BUSID '{busId}' konnte nicht entfernt werden.");
+                return;
+            }
+
             var exitCode = await RunCommandElevatedAsync(["unbind", "--busid", busId], cancellationToken);
             EnsureSuccess(exitCode, $"USB-Freigabe für BUSID '{busId}' konnte nicht entfernt werden.");
             return;
@@ -240,9 +270,17 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 
     public async Task UnbindAllAsync(CancellationToken cancellationToken)
     {
-        await EnsureReadyAsync(cancellationToken);
+        var shutdownCleanupMode = IsShutdownCleanupModeActive();
+        await EnsureReadyAsync(cancellationToken, allowElevationPrompt: !shutdownCleanupMode, allowServiceStart: !shutdownCleanupMode);
         if (!IsProcessElevated())
         {
+            if (shutdownCleanupMode)
+            {
+                var nonElevatedResult = await RunCommandAsync(["unbind", "--all"], cancellationToken);
+                EnsureSuccess(nonElevatedResult, "USB-Freigaben konnten nicht vollständig entfernt werden.");
+                return;
+            }
+
             var exitCode = await RunCommandElevatedAsync(["unbind", "--all"], cancellationToken);
             EnsureSuccess(exitCode, "USB-Freigaben konnten nicht vollständig entfernt werden.");
             return;
@@ -259,9 +297,17 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
             throw new ArgumentException("Persisted GUID darf nicht leer sein.", nameof(persistedGuid));
         }
 
-        await EnsureReadyAsync(cancellationToken);
+        var shutdownCleanupMode = IsShutdownCleanupModeActive();
+        await EnsureReadyAsync(cancellationToken, allowElevationPrompt: !shutdownCleanupMode, allowServiceStart: !shutdownCleanupMode);
         if (!IsProcessElevated())
         {
+            if (shutdownCleanupMode)
+            {
+                var nonElevatedResult = await RunCommandAsync(["unbind", "--guid", persistedGuid], cancellationToken);
+                EnsureSuccess(nonElevatedResult, $"USB-Freigabe für GUID '{persistedGuid}' konnte nicht entfernt werden.");
+                return;
+            }
+
             var exitCode = await RunCommandElevatedAsync(["unbind", "--guid", persistedGuid], cancellationToken);
             EnsureSuccess(exitCode, $"USB-Freigabe für GUID '{persistedGuid}' konnte nicht entfernt werden.");
             return;
@@ -273,7 +319,8 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 
     public async Task DetachAsync(string busId, CancellationToken cancellationToken)
     {
-        await EnsureReadyAsync(cancellationToken);
+        var shutdownCleanupMode = IsShutdownCleanupModeActive();
+        await EnsureReadyAsync(cancellationToken, allowElevationPrompt: !shutdownCleanupMode, allowServiceStart: !shutdownCleanupMode);
         var result = await RunCommandAsync(["detach", "--busid", busId], cancellationToken);
         EnsureSuccess(result, $"USB-Gerät mit BUSID '{busId}' konnte nicht getrennt werden.");
     }
@@ -308,6 +355,11 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
     {
         if (_elevatedSessionUnavailable)
         {
+            if (IsShutdownCleanupModeActive())
+            {
+                return await RunCommandAsync(args, cancellationToken);
+            }
+
             var fallbackExitCode = await RunCommandElevatedAsync(args, cancellationToken);
             return new CommandResult(fallbackExitCode, string.Empty, string.Empty);
         }
@@ -324,6 +376,11 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         {
             _elevatedSessionUnavailable = true;
             Log.Warning(ex, "Persistent elevated USB session could not be established. Falling back to direct elevated command mode for this app session.");
+            if (IsShutdownCleanupModeActive())
+            {
+                return await RunCommandAsync(args, cancellationToken);
+            }
+
             var exitCode = await RunCommandElevatedAsync(args, cancellationToken);
             return new CommandResult(exitCode, string.Empty, string.Empty);
         }
@@ -374,6 +431,11 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
 
     private async Task EnsureElevatedSessionConnectedAsync(CancellationToken cancellationToken)
     {
+        if (IsShutdownCleanupModeActive())
+        {
+            throw new InvalidOperationException("Elevated USB-Sitzung ist während Shutdown-Cleanup deaktiviert.");
+        }
+
         await _elevatedSessionGate.WaitAsync(cancellationToken);
         try
         {
@@ -1111,7 +1173,10 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         }
     }
 
-    private static async Task EnsureReadyAsync(CancellationToken cancellationToken, bool allowElevationPrompt = true)
+    private static async Task EnsureReadyAsync(
+        CancellationToken cancellationToken,
+        bool allowElevationPrompt = true,
+        bool allowServiceStart = true)
     {
         if (IsSystemShutdownInProgress())
         {
@@ -1119,20 +1184,47 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
             return;
         }
 
+        if (IsEnsureReadyCacheFresh())
+        {
+            return;
+        }
+
         await EnsureReadyGate.WaitAsync(cancellationToken);
         try
         {
+            if (IsEnsureReadyCacheFresh())
+            {
+                return;
+            }
+
             if (!await IsUsbipdAvailableAsync(cancellationToken))
             {
                 throw new InvalidOperationException(
                     "usbipd-win ist nicht installiert. Bitte im HyperTool-Installer die optionale usbipd-win-Installation auswählen oder usbipd-win manuell installieren.");
             }
 
-            await EnsureUsbipdServiceRunningAsync(cancellationToken, allowElevationPrompt);
+            await EnsureUsbipdServiceRunningAsync(cancellationToken, allowElevationPrompt, allowServiceStart);
+            MarkEnsureReadySuccessful();
         }
         finally
         {
             EnsureReadyGate.Release();
+        }
+    }
+
+    private static bool IsEnsureReadyCacheFresh()
+    {
+        lock (EnsureReadyCacheSync)
+        {
+            return (DateTimeOffset.UtcNow - _lastEnsureReadySuccessUtc) < EnsureReadySuccessCacheDuration;
+        }
+    }
+
+    private static void MarkEnsureReadySuccessful()
+    {
+        lock (EnsureReadyCacheSync)
+        {
+            _lastEnsureReadySuccessUtc = DateTimeOffset.UtcNow;
         }
     }
 
@@ -1148,7 +1240,10 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         return whereResult.ExitCode == 0 && !string.IsNullOrWhiteSpace(whereResult.StandardOutput);
     }
 
-    private static async Task EnsureUsbipdServiceRunningAsync(CancellationToken cancellationToken, bool allowElevationPrompt)
+    private static async Task EnsureUsbipdServiceRunningAsync(
+        CancellationToken cancellationToken,
+        bool allowElevationPrompt,
+        bool allowServiceStart)
     {
         if (IsSystemShutdownInProgress())
         {
@@ -1182,6 +1277,11 @@ public sealed class UsbIpdCliService : IUsbIpService, IDisposable
         if (stateCode == 4)
         {
             return;
+        }
+
+        if (!allowServiceStart)
+        {
+            throw new InvalidOperationException("usbipd-Dienst läuft nicht.");
         }
 
         if (IsProcessElevated())

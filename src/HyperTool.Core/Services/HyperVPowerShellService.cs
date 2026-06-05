@@ -873,10 +873,14 @@ public sealed class HyperVPowerShellService : IHyperVService
             $"$networkCategory = {ToPsSingleQuoted(networkCategory ?? string.Empty)}; " +
             "$networkCategory = if ([string]::IsNullOrWhiteSpace($networkCategory)) { '' } else { $networkCategory.Trim() }; " +
             "if ($networkCategory -notin @('Public','Private')) { throw \"Ungültige Netzprofil-Kategorie. Erlaubt: Public oder Private.\" }; " +
+            "if (-not (Get-Command Get-NetConnectionProfile -ErrorAction SilentlyContinue)) { throw \"PowerShell-Cmdlet 'Get-NetConnectionProfile' ist nicht verfügbar.\" }; " +
+            "if (-not (Get-Command Set-NetConnectionProfile -ErrorAction SilentlyContinue)) { throw \"PowerShell-Cmdlet 'Set-NetConnectionProfile' ist nicht verfügbar.\" }; " +
             "$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); " +
             "if (-not $isAdmin) { throw \"Zum Ändern des Host-Netzprofils sind Administratorrechte erforderlich.\" }; " +
             "$profiles = @(); " +
-            "if (-not [string]::IsNullOrWhiteSpace($adapterName)) { $profiles = @(Get-NetConnectionProfile -InterfaceAlias $adapterName -ErrorAction SilentlyContinue) }; " +
+            "if (-not [string]::IsNullOrWhiteSpace($adapterName)) { " +
+            "  $profiles = @(Get-NetConnectionProfile -InterfaceAlias $adapterName -ErrorAction SilentlyContinue); " +
+            "}; " +
             "if ($profiles.Count -eq 0 -and [string]::IsNullOrWhiteSpace($adapterName)) { " +
             "  $profiles = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object { ($_.IPv4Connectivity -ne 'Disconnected') -or ($_.IPv6Connectivity -ne 'Disconnected') }); " +
             "  if ($profiles.Count -eq 0) { $profiles = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue) }; " +
@@ -884,26 +888,35 @@ public sealed class HyperVPowerShellService : IHyperVService
             "if ($profiles.Count -eq 0) { throw \"Kein passendes Netzprofil gefunden.\" }; " +
             "$domainSkipped = 0; " +
             "$changed = 0; " +
+            "$alreadyTarget = 0; " +
+            "$errors = @(); " +
             "foreach ($profile in $profiles) { " +
             "  if ($null -eq $profile.InterfaceIndex) { continue }; " +
             "  $currentCategory = if ($null -ne $profile.NetworkCategory) { $profile.NetworkCategory.ToString() } else { '' }; " +
             "  if ($currentCategory -eq 'DomainAuthenticated') { $domainSkipped++; continue }; " +
-            "  if ($currentCategory -eq $networkCategory) { continue }; " +
+            "  if ($currentCategory -eq $networkCategory) { $alreadyTarget++; continue }; " +
             "  try { " +
             "    Set-NetConnectionProfile -InterfaceIndex $profile.InterfaceIndex -NetworkCategory $networkCategory -ErrorAction Stop; " +
             "    $changed++; " +
             "  } catch { " +
             "    $message = $_.Exception.Message; " +
-            "    if ($message -match 'Network List Manager Policies|Group Policy') { throw \"Netzprofiländerung ist durch Gruppenrichtlinie blockiert.\" }; " +
-            "    throw; " +
+            "    if ([string]::IsNullOrWhiteSpace($message)) { $message = ($_ | Out-String).Trim() }; " +
+            "    if ($message -match 'Network List Manager Policies|Group Policy|Gruppenrichtlinie') { " +
+            "      $errors += \"Gruppenrichtlinie blockiert die Änderung für InterfaceIndex=$($profile.InterfaceIndex).\"; " +
+            "    } else { " +
+            "      $errors += \"InterfaceIndex=$($profile.InterfaceIndex): $message\"; " +
+            "    }; " +
+            "    continue; " +
             "  }; " +
             "}; " +
-            "if ($changed -eq 0 -and $domainSkipped -gt 0) { throw \"Domänenprofile können nicht manuell auf Privat/Öffentlich umgestellt werden.\" }; " +
-            "Write-Output 'HT_OK'";
+            "if ($changed -gt 0 -or $alreadyTarget -gt 0) { Write-Output 'HT_OK' } " +
+            "elseif ($domainSkipped -gt 0 -and $errors.Count -eq 0) { throw \"Domänenprofile können nicht manuell geändert werden.\" } " +
+            "elseif ($errors.Count -gt 0) { throw ('Netzprofil konnte nicht geändert werden. ' + ($errors -join ' | ')) } " +
+            "else { throw \"Kein änderbares Netzprofil gefunden.\" }";
 
         try
         {
-            await InvokePowerShellElevatedNonQueryAsync(script, cancellationToken);
+            await InvokePowerShellElevatedNonQueryAsync(script, cancellationToken, requireHyperVModule: false);
         }
         catch (UnauthorizedAccessException ex) when (ex.Message.Contains("UAC", StringComparison.OrdinalIgnoreCase))
         {
@@ -925,6 +938,11 @@ public sealed class HyperVPowerShellService : IHyperVService
                                                  || ex.Message.Contains("Gruppenrichtlinie", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("Netzprofiländerung ist durch Gruppenrichtlinie blockiert.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("Get-NetConnectionProfile", StringComparison.OrdinalIgnoreCase)
+                                                 || ex.Message.Contains("Set-NetConnectionProfile", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Die benötigten Netzwerk-Cmdlets fehlen auf diesem System (Get/Set-NetConnectionProfile). Prüfe PowerShell/NetTCPIP-Komponenten.");
         }
     }
 
@@ -1784,11 +1802,22 @@ public sealed class HyperVPowerShellService : IHyperVService
         return standardOutput.Trim();
     }
 
-    private static async Task InvokePowerShellElevatedNonQueryAsync(string script, CancellationToken cancellationToken)
+    private static async Task InvokePowerShellElevatedNonQueryAsync(string script, CancellationToken cancellationToken, bool requireHyperVModule = true)
     {
+        if (IsProcessElevated())
+        {
+            _ = await InvokePowerShellAsync(script, cancellationToken);
+            return;
+        }
+
         var statusFilePath = Path.Combine(Path.GetTempPath(), $"hypertool-netprofile-{Guid.NewGuid():N}.txt");
         var scriptFilePath = Path.Combine(Path.GetTempPath(), $"hypertool-netprofile-{Guid.NewGuid():N}.ps1");
         var statusFilePathPs = ToPsSingleQuoted(statusFilePath);
+        var keepDiagnosticArtifacts = false;
+
+        var importHyperVModuleSnippet = requireHyperVModule
+            ? "Import-Module Hyper-V -ErrorAction Stop; "
+            : string.Empty;
 
         var wrappedScript =
             "$ErrorActionPreference = 'Stop'; " +
@@ -1798,19 +1827,21 @@ public sealed class HyperVPowerShellService : IHyperVService
             "$statusFilePath = " + statusFilePathPs + "; " +
             "$statusDir = Split-Path -Parent -Path $statusFilePath; " +
             "if (-not [string]::IsNullOrWhiteSpace($statusDir) -and -not (Test-Path -LiteralPath $statusDir)) { New-Item -Path $statusDir -ItemType Directory -Force | Out-Null }; " +
-            "Import-Module Hyper-V -ErrorAction Stop; " +
             "try { " +
+            importHyperVModuleSnippet +
             script + "; " +
             "Set-Content -LiteralPath $statusFilePath -Value 'OK' -Encoding UTF8 -Force; " +
             "} catch { " +
             "$msg = if ($null -ne $_.Exception -and -not [string]::IsNullOrWhiteSpace($_.Exception.Message)) { $_.Exception.Message } else { ($_ | Out-String) }; " +
+            "$details = ($_ | Out-String); " +
+            "if (-not [string]::IsNullOrWhiteSpace($details)) { $msg = ($msg + ' | Details: ' + $details.Trim()) }; " +
             "Set-Content -LiteralPath $statusFilePath -Value ('ERROR:' + $msg) -Encoding UTF8 -Force; " +
             "exit 1; " +
             "}";
 
         await File.WriteAllTextAsync(scriptFilePath, wrappedScript, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken);
 
-        var args = $"-NoProfile -NonInteractive -File \"{scriptFilePath}\"";
+        var args = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{scriptFilePath}\"";
 
         try
         {
@@ -1820,6 +1851,7 @@ public sealed class HyperVPowerShellService : IHyperVService
                 Arguments = args,
                 UseShellExecute = true,
                 Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden,
                 WorkingDirectory = Environment.CurrentDirectory
             };
 
@@ -1853,8 +1885,16 @@ public sealed class HyperVPowerShellService : IHyperVService
 
             if (process.ExitCode != 0)
             {
-                throw new InvalidOperationException("Erhöhte Ausführung fehlgeschlagen.");
+                keepDiagnosticArtifacts = true;
+                throw new InvalidOperationException(
+                    $"Erhöhte Ausführung fehlgeschlagen (ExitCode={process.ExitCode}). " +
+                    $"Diagnose-Dateien: Status='{statusFilePath}', Script='{scriptFilePath}'.");
             }
+
+            keepDiagnosticArtifacts = true;
+            throw new InvalidOperationException(
+                "Erhöhte Ausführung fehlgeschlagen (kein Status vom erhöhten Prozess empfangen). " +
+                $"Diagnose-Dateien: Status='{statusFilePath}', Script='{scriptFilePath}'.");
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
@@ -1864,7 +1904,7 @@ public sealed class HyperVPowerShellService : IHyperVService
         {
             try
             {
-                if (File.Exists(statusFilePath))
+                if (!keepDiagnosticArtifacts && File.Exists(statusFilePath))
                 {
                     File.Delete(statusFilePath);
                 }
@@ -1875,7 +1915,7 @@ public sealed class HyperVPowerShellService : IHyperVService
 
             try
             {
-                if (File.Exists(scriptFilePath))
+                if (!keepDiagnosticArtifacts && File.Exists(scriptFilePath))
                 {
                     File.Delete(scriptFilePath);
                 }

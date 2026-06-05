@@ -1,7 +1,9 @@
+using HyperTool.Models;
 using Microsoft.Win32;
 using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 
 namespace HyperTool.Services;
 
@@ -13,8 +15,10 @@ namespace HyperTool.Services;
 public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
 {
     private const int MaxConcurrentSubscribers = 64;
-    private static readonly byte[] UsbShareChangedPayload =
-        Encoding.UTF8.GetBytes("{\"event\":\"usb-share-changed\"}\n");
+    private static readonly JsonSerializerOptions PayloadJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     private sealed class SubscriberEntry
     {
@@ -23,15 +27,19 @@ public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
     }
 
     private readonly Guid _serviceId;
+    private readonly Func<IReadOnlyList<UsbIpDeviceInfo>>? _usbDeviceSnapshotProvider;
     private readonly ConcurrentDictionary<Guid, SubscriberEntry> _subscribers = new();
     private readonly SemaphoreSlim _subscriberGate = new(MaxConcurrentSubscribers, MaxConcurrentSubscribers);
     private Socket? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptLoopTask;
 
-    public HyperVSocketUsbChangeNotificationHostListener(Guid? serviceId = null)
+    public HyperVSocketUsbChangeNotificationHostListener(
+        Guid? serviceId = null,
+        Func<IReadOnlyList<UsbIpDeviceInfo>>? usbDeviceSnapshotProvider = null)
     {
         _serviceId = serviceId ?? HyperVSocketUsbTunnelDefaults.UsbChangeNotificationServiceId;
+        _usbDeviceSnapshotProvider = usbDeviceSnapshotProvider;
     }
 
     public bool IsRunning { get; private set; }
@@ -68,13 +76,15 @@ public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
             return;
         }
 
+        var payload = BuildUsbShareChangedPayload(_usbDeviceSnapshotProvider?.Invoke() ?? []);
+
         var toRemove = new List<Guid>();
 
         foreach (var (id, entry) in _subscribers)
         {
             try
             {
-                await entry.Socket.SendAsync(UsbShareChangedPayload, SocketFlags.None, cancellationToken);
+                await entry.Socket.SendAsync(payload, SocketFlags.None, cancellationToken);
             }
             catch
             {
@@ -89,6 +99,39 @@ public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
                 try { dead.Socket.Dispose(); } catch { }
             }
         }
+    }
+
+    private static byte[] BuildUsbShareChangedPayload(IReadOnlyList<UsbIpDeviceInfo> hostDevices)
+    {
+        var envelope = new UsbChangeNotificationEnvelope
+        {
+            EventId = Guid.NewGuid().ToString("N"),
+            HasCatalogSnapshot = true,
+            HostDevices = hostDevices
+                .Where(device => device is not null)
+                .Select(device => new UsbIpDeviceInfo
+                {
+                    BusId = (device.BusId ?? string.Empty).Trim(),
+                    Description = (device.Description ?? string.Empty).Trim(),
+                    HardwareId = (device.HardwareId ?? string.Empty).Trim(),
+                    HardwareIdentityKey = (device.HardwareIdentityKey ?? string.Empty).Trim(),
+                    InstanceId = (device.InstanceId ?? string.Empty).Trim(),
+                    PersistedGuid = (device.PersistedGuid ?? string.Empty).Trim(),
+                    ClientIpAddress = (device.ClientIpAddress ?? string.Empty).Trim(),
+                    AttachedGuestComputerName = (device.AttachedGuestComputerName ?? string.Empty).Trim(),
+                    DeviceIdentityKey = (device.DeviceIdentityKey ?? string.Empty).Trim(),
+                    CustomName = (device.CustomName ?? string.Empty).Trim(),
+                    CustomComment = (device.CustomComment ?? string.Empty).Trim(),
+                    IsAttachedByOtherGuest = device.IsAttachedByOtherGuest,
+                    IsGuestConnectionBlocked = device.IsGuestConnectionBlocked,
+                    IsAttachedInCurrentGuest = device.IsAttachedInCurrentGuest
+                })
+                .Where(device => !string.IsNullOrWhiteSpace(device.BusId))
+                .ToList()
+        };
+
+        var json = JsonSerializer.Serialize(envelope, PayloadJsonOptions);
+        return Encoding.UTF8.GetBytes(json + "\n");
     }
 
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
@@ -136,6 +179,19 @@ public sealed class HyperVSocketUsbChangeNotificationHostListener : IDisposable
     {
         var entry = new SubscriberEntry { Socket = socket };
         _subscribers[entry.Id] = entry;
+
+        try
+        {
+            var initialPayload = BuildUsbShareChangedPayload(_usbDeviceSnapshotProvider?.Invoke() ?? []);
+            await socket.SendAsync(initialPayload, SocketFlags.None, cancellationToken);
+        }
+        catch
+        {
+            _subscribers.TryRemove(entry.Id, out _);
+            try { socket.Dispose(); } catch { }
+            _subscriberGate.Release();
+            return;
+        }
 
         // The guest does not send any data on this channel. We just wait for the socket
         // to be closed (ReceiveAsync returning 0) so we can prune it from the subscriber list.

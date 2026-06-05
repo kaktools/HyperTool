@@ -16,6 +16,8 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
     private readonly object _syncLock = new();
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private static readonly TimeSpan ToggleRefreshInterval = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan BackendRefreshTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan VmAdapterRefreshTimeout = TimeSpan.FromSeconds(8);
 
     private TrayControlCenterWindow? _window;
     private Action? _showMainWindowAction;
@@ -52,6 +54,7 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
     private int _selectedUsbIndex = -1;
     private string? _selectedVmAdapterName;
     private string? _selectedSwitchName;
+    private bool _isVmNetworkDataLoading;
     private bool _isInitialized;
     private bool _isBusy;
     private bool _isBackgroundRefreshRunning;
@@ -156,6 +159,7 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
             _mode = mode;
 
             ReloadDataFromSources();
+            _isVmNetworkDataLoading = GetSelectedVm() is not null;
             UpdateWindowTheme();
             UpdateWindowView();
             PositionWindowNearTray();
@@ -360,6 +364,8 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
             _selectedVmIndex = idx;
             _selectedVmAdapterName = null;
             SyncSelectedSwitchWithVm();
+            _isVmNetworkDataLoading = true;
+            UpdateWindowView();
             await RefreshSelectedVmAdaptersAsync();
             SyncSelectedSwitchWithVm();
             UpdateWindowView();
@@ -403,6 +409,8 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
             var adapterName = _vmAdapters.Count > 1 ? _selectedVmAdapterName : null;
             await _connectVmToSwitchAction(vm.Name, selectedSwitch, adapterName);
             await RefreshDataAsync();
+            await RefreshSelectedVmAdaptersAsync();
+            SyncSelectedSwitchWithVm();
             UpdateWindowView();
         }, "tray-switch-select-connect");
     }
@@ -470,7 +478,7 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
             {
                 try
                 {
-                    await _refreshTrayDataAction();
+                    await _refreshTrayDataAction().WaitAsync(BackendRefreshTimeout);
                     _lastBackendRefreshUtc = DateTime.UtcNow;
                 }
                 catch (Exception ex)
@@ -492,14 +500,64 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         var previousVmName = GetSelectedVm()?.Name;
 
         _vms.Clear();
-        _vms.AddRange(_getVms?.Invoke() ?? []);
+        var seenVmNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var vm in _getVms?.Invoke() ?? [])
+        {
+            if (vm is null || string.IsNullOrWhiteSpace(vm.Name))
+            {
+                continue;
+            }
+
+            var normalizedVmName = vm.Name.Trim();
+            if (!seenVmNames.Add(normalizedVmName))
+            {
+                continue;
+            }
+
+            _vms.Add(vm);
+        }
 
         _switches.Clear();
-        _switches.AddRange((_getSwitches?.Invoke() ?? []).OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase));
+        var seenSwitchNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var vmSwitch in (_getSwitches?.Invoke() ?? []).OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            if (vmSwitch is null || string.IsNullOrWhiteSpace(vmSwitch.Name))
+            {
+                continue;
+            }
+
+            var normalizedSwitchName = vmSwitch.Name.Trim();
+            if (!seenSwitchNames.Add(normalizedSwitchName))
+            {
+                continue;
+            }
+
+            _switches.Add(vmSwitch);
+        }
 
         var preferredUsb = _getSelectedUsbDevice?.Invoke();
         _usbDevices.Clear();
-        _usbDevices.AddRange(_getUsbDevices?.Invoke() ?? []);
+        var seenUsbKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var device in _getUsbDevices?.Invoke() ?? [])
+        {
+            if (device is null)
+            {
+                continue;
+            }
+
+            var selectionKey = BuildUsbSelectionKey(device);
+            if (string.IsNullOrWhiteSpace(selectionKey))
+            {
+                selectionKey = (device.BusId ?? string.Empty).Trim();
+            }
+
+            if (!string.IsNullOrWhiteSpace(selectionKey) && !seenUsbKeys.Add(selectionKey))
+            {
+                continue;
+            }
+
+            _usbDevices.Add(device);
+        }
 
         if (_usbDevices.Count == 0)
         {
@@ -575,19 +633,35 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         if (vm is null || _getVmAdapters is null)
         {
             _selectedVmAdapterName = null;
+            _isVmNetworkDataLoading = false;
             return;
         }
 
+        _isVmNetworkDataLoading = true;
         try
         {
-            var adapters = await _getVmAdapters(vm.Name);
-            _vmAdapters.AddRange(adapters
-                .Where(adapter => !string.IsNullOrWhiteSpace(adapter.Name))
-                .OrderBy(adapter => adapter.DisplayName, StringComparer.OrdinalIgnoreCase));
+            var adapters = await _getVmAdapters(vm.Name).WaitAsync(VmAdapterRefreshTimeout);
+            var seenAdapterNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var adapter in adapters
+                .Where(adapter => adapter is not null && !string.IsNullOrWhiteSpace(adapter.Name))
+                .OrderBy(adapter => adapter.DisplayName, StringComparer.OrdinalIgnoreCase))
+            {
+                var normalizedAdapterName = adapter.Name.Trim();
+                if (!seenAdapterNames.Add(normalizedAdapterName))
+                {
+                    continue;
+                }
+
+                _vmAdapters.Add(adapter);
+            }
         }
         catch (Exception ex)
         {
             Log.Warning(ex, "Tray control center adapter refresh failed for VM {VmName}", vm.Name);
+        }
+        finally
+        {
+            _isVmNetworkDataLoading = false;
         }
 
         if (_vmAdapters.Count <= 1)
@@ -618,6 +692,11 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         try
         {
             await RefreshDataAsync(refreshBackend: true);
+            Enqueue(() =>
+            {
+                _isVmNetworkDataLoading = GetSelectedVm() is not null;
+                UpdateWindowView();
+            });
             await RefreshSelectedVmAdaptersAsync();
             SyncSelectedSwitchWithVm();
             Enqueue(UpdateWindowView);
@@ -645,6 +724,8 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
         try
         {
             await RefreshDataAsync(refreshBackend: false);
+            _isVmNetworkDataLoading = GetSelectedVm() is not null;
+            UpdateWindowView();
             await RefreshSelectedVmAdaptersAsync();
             SyncSelectedSwitchWithVm();
             UpdateWindowView();
@@ -710,10 +791,12 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
             SelectedVmDisplay = hasVm ? vm!.DisplayLabel : "Keine VM ausgewählt",
             SelectedVmMeta = hasVm ? $"{runtimeState} · {runtimeSwitch}" : "-",
             SelectedVmName = hasVm ? vm!.Name : null,
-            ShowNetworkAdapterSelection = true,
-            CanSelectNetworkAdapter = trayEnabled && hasVm && _vmAdapters.Count > 1,
-            SelectedNetworkAdapterName = _vmAdapters.Count > 1 ? _selectedVmAdapterName : null,
+            ShowNetworkAdapterSelection = hasVm,
+            CanSelectNetworkAdapter = trayEnabled && hasVm && !_isVmNetworkDataLoading && _vmAdapters.Count > 1,
+            SelectedNetworkAdapterName = _selectedVmAdapterName,
             ActiveSwitchDisplay = $"Aktiv: {runtimeSwitch}",
+            IsNetworkDataLoading = hasVm && _isVmNetworkDataLoading,
+            NetworkDataLoadingText = "Netzwerkdaten werden geladen...",
             VisibilityButtonText = (_isMainWindowVisible?.Invoke() ?? true) ? "⌂  Ausblenden" : "⌂  Einblenden",
             SelectedUsbKey = _selectedUsbDevice is null ? null : BuildUsbSelectionKey(_selectedUsbDevice),
             CanUsbRefresh = trayEnabled && usbRuntimeHealthy,

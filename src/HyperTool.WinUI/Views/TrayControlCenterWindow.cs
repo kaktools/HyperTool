@@ -234,7 +234,7 @@ internal sealed class TrayControlCenterWindow : Window
         _vmNameText.Text = state.SelectedVmDisplay;
         _vmMetaText.Text = state.SelectedVmMeta;
         _vmMetaText.Foreground = ResolveVmMetaBrush(state.SelectedVmMeta);
-        _networkStatusText.Text = state.ActiveSwitchDisplay;
+        _networkStatusText.Text = state.IsNetworkDataLoading ? state.NetworkDataLoadingText : state.ActiveSwitchDisplay;
         _startButton.IsEnabled = state.CanStart;
         _stopButton.IsEnabled = state.CanStop;
         _restartButton.IsEnabled = state.CanRestart;
@@ -253,9 +253,15 @@ internal sealed class TrayControlCenterWindow : Window
         _fullVisibilityButton.Content = state.VisibilityButtonText;
         _compactVisibilityButton.Content = state.VisibilityButtonText;
 
-        _networkAdapterCombo.Visibility = Visibility.Visible;
+        _networkAdapterCombo.Visibility = state.ShowNetworkAdapterSelection ? Visibility.Visible : Visibility.Collapsed;
 
-        var adapterRenderKey = string.Join('|', state.NetworkAdapters.Select(item => item.Name));
+        var dedupedNetworkAdapters = state.NetworkAdapters
+            .Where(item => !string.IsNullOrWhiteSpace(item.Name))
+            .GroupBy(item => item.Name.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
+
+        var adapterRenderKey = string.Join('|', dedupedNetworkAdapters.Select(item => $"{item.Name}:{item.Label}:{item.SwitchName}"));
         if (!string.Equals(_lastAdapterRenderKey, adapterRenderKey, StringComparison.Ordinal))
         {
             _lastAdapterRenderKey = adapterRenderKey;
@@ -263,7 +269,7 @@ internal sealed class TrayControlCenterWindow : Window
             try
             {
                 _networkAdapterCombo.Items.Clear();
-                foreach (var adapter in state.NetworkAdapters)
+                foreach (var adapter in dedupedNetworkAdapters)
                 {
                     _networkAdapterCombo.Items.Add(new ComboBoxItem
                     {
@@ -280,12 +286,18 @@ internal sealed class TrayControlCenterWindow : Window
 
         if (_networkAdapterCombo.Items.Count == 0)
         {
+            _networkAdapterCombo.PlaceholderText = state.IsNetworkDataLoading
+                ? "Netzwerkkarten werden geladen..."
+                : "Netzwerkkarte auswählen";
             _networkAdapterCombo.SelectedIndex = -1;
             _networkAdapterCombo.IsEnabled = false;
         }
         else
         {
-            _networkAdapterCombo.IsEnabled = state.CanSelectNetworkAdapter;
+            _networkAdapterCombo.PlaceholderText = "Netzwerkkarte auswählen";
+            _networkAdapterCombo.IsEnabled = state.ShowNetworkAdapterSelection
+                                          && state.CanSelectNetworkAdapter
+                                          && _networkAdapterCombo.Items.Count > 1;
             var selectedAdapterName = state.SelectedNetworkAdapterName ?? string.Empty;
             var targetAdapterIndex = -1;
             for (var index = 0; index < _networkAdapterCombo.Items.Count; index++)
@@ -396,7 +408,7 @@ internal sealed class TrayControlCenterWindow : Window
             {
                 _switchChipPanel.Children.Add(new TextBlock
                 {
-                    Text = "Keine Switches verfügbar",
+                    Text = state.IsNetworkDataLoading ? "Switches werden geladen..." : "Keine Switches verfügbar",
                     Opacity = 0.8,
                     FontSize = 12,
                     Foreground = _textSecondaryBrush
@@ -931,6 +943,10 @@ internal sealed class TrayControlCenterViewState
     public string? SelectedNetworkAdapterName { get; set; }
 
     public string ActiveSwitchDisplay { get; set; } = "Aktiv: -";
+
+    public bool IsNetworkDataLoading { get; set; }
+
+    public string NetworkDataLoadingText { get; set; } = "Netzwerkdaten werden geladen...";
 
     public string VisibilityButtonText { get; set; } = "⌂  Ausblenden";
 
