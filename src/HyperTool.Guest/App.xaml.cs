@@ -1655,7 +1655,7 @@ public sealed partial class App : Application
                 }
             }
 
-            await TryShowGuestVersionInfoOnFirstStartAsync(canShowDialog: !startHiddenInTray);
+            await TryShowGuestVersionInfoOnFirstStartAsync();
 
             _ = RunDeferredStartupTasksAsync();
 
@@ -1683,7 +1683,7 @@ public sealed partial class App : Application
         }
     }
 
-    private async Task TryShowGuestVersionInfoOnFirstStartAsync(bool canShowDialog)
+    private async Task TryShowGuestVersionInfoOnFirstStartAsync()
     {
         if (_config is null)
         {
@@ -1709,66 +1709,108 @@ public sealed partial class App : Application
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(previousVersion))
+        var previousVersionForDisplay = string.IsNullOrWhiteSpace(previousVersion)
+            ? "(keine gespeicherte Vorversion)"
+            : previousVersion;
+
+        var restoreHiddenAfterDialog = false;
+        try
         {
+            try
+            {
+                if (_mainWindow?.AppWindow is { } appWindow && !appWindow.IsVisible)
+                {
+                    appWindow.Show();
+                    _mainWindow.Activate();
+                    restoreHiddenAfterDialog = _isTrayFunctional && _minimizeToTray;
+                }
+            }
+            catch
+            {
+            }
+
+            var hostContent = await WaitForGuestMainWindowXamlRootAsync();
+            if (hostContent?.XamlRoot is null)
+            {
+                GuestLogger.Info("version.info.deferred", "Update-Hinweis wurde verschoben, weil XamlRoot noch nicht bereit war.", new
+                {
+                    previousVersion = previousVersionForDisplay,
+                    currentVersion
+                });
+                return;
+            }
+
+            var releaseUrl = BuildReleaseNotesUrl();
+            var infoLines = string.Join("\n", new[]
+            {
+                $"Neue Version erkannt: {currentVersion}",
+                $"Vorherige Version: {previousVersionForDisplay}",
+                string.Empty,
+                "Wichtige Hinweise:",
+                "- USB-Funktionalität wurde umfassend überarbeitet.",
+                "- Darstellungs-Fixes im Bereich Anzeige der Netzwerkadapter.",
+                "- Allgemeine Stabilitätsverbesserungen."
+            });
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = hostContent.XamlRoot,
+                Title = "HyperTool Guest wurde aktualisiert",
+                Content = infoLines,
+                PrimaryButtonText = "Release Notes öffnen",
+                CloseButtonText = "Schließen",
+                DefaultButton = ContentDialogButton.Primary
+            };
+
+            try
+            {
+                var result = await dialog.ShowAsync();
+                if (result == ContentDialogResult.Primary)
+                {
+                    TryOpenUrl(releaseUrl);
+                }
+            }
+            catch (Exception ex)
+            {
+                GuestLogger.Warn("version.info.show_failed", ex.Message, new
+                {
+                    exceptionType = ex.GetType().FullName
+                });
+                return;
+            }
+
             _config.LastSeenGuestToolVersion = currentVersion;
             _config.LastSeenGuestWhatsNewNoticeVersion = CurrentGuestWhatsNewNoticeVersion;
             GuestConfigService.Save(_configPath, _config);
-            return;
         }
-
-        if (!canShowDialog || _mainWindow?.Content is not FrameworkElement hostContent || hostContent.XamlRoot is null)
+        finally
         {
-            GuestLogger.Info("version.info.deferred", "Update-Hinweis wurde verschoben, weil kein sichtbares Fenster verfugbar ist.", new
+            if (restoreHiddenAfterDialog)
             {
-                previousVersion,
-                currentVersion
-            });
-            return;
-        }
-
-        var releaseUrl = BuildReleaseNotesUrl();
-        var infoLines = string.Join("\n", new[]
-        {
-            $"Neue Version erkannt: {currentVersion}",
-            $"Vorherige Version: {previousVersion}",
-            string.Empty,
-            "Wichtige Hinweise:",
-            "- USB-Funktionalität wurde umfassend überarbeitet.",
-            "- Darstellungs-Fixes im Bereich Anzeige der Netzwerkadapter.",
-            "- Allgemeine Stabilitätsverbesserungen."
-        });
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = hostContent.XamlRoot,
-            Title = "HyperTool Guest wurde aktualisiert",
-            Content = infoLines,
-            PrimaryButtonText = "Release Notes öffnen",
-            CloseButtonText = "Schließen",
-            DefaultButton = ContentDialogButton.Primary
-        };
-
-        try
-        {
-            var result = await dialog.ShowAsync();
-            if (result == ContentDialogResult.Primary)
-            {
-                TryOpenUrl(releaseUrl);
+                try
+                {
+                    _mainWindow?.AppWindow.Hide();
+                }
+                catch
+                {
+                }
             }
         }
-        catch (Exception ex)
+    }
+
+    private async Task<FrameworkElement?> WaitForGuestMainWindowXamlRootAsync()
+    {
+        for (var attempt = 0; attempt < 12; attempt++)
         {
-            GuestLogger.Warn("version.info.show_failed", ex.Message, new
+            if (_mainWindow?.Content is FrameworkElement hostContent && hostContent.XamlRoot is not null)
             {
-                exceptionType = ex.GetType().FullName
-            });
-            return;
+                return hostContent;
+            }
+
+            await Task.Delay(120);
         }
 
-        _config.LastSeenGuestToolVersion = currentVersion;
-        _config.LastSeenGuestWhatsNewNoticeVersion = CurrentGuestWhatsNewNoticeVersion;
-        GuestConfigService.Save(_configPath, _config);
+        return null;
     }
 
     private static string ResolveCurrentApplicationVersion()

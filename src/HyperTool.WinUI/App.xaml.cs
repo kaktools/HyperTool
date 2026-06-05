@@ -394,8 +394,7 @@ public sealed partial class App : Application
             await TryShowHostVersionInfoOnFirstStartAsync(
                 configResult.Config,
                 configService,
-                configResult.ConfigPath,
-                canShowDialog: !startHiddenInTray);
+                configResult.ConfigPath);
 
             _ = RefreshHostUsbDevicesSafeAsync();
 
@@ -411,8 +410,7 @@ public sealed partial class App : Application
     private async Task TryShowHostVersionInfoOnFirstStartAsync(
         HyperToolConfig config,
         IConfigService configService,
-        string configPath,
-        bool canShowDialog)
+        string configPath)
     {
         if (config is null)
         {
@@ -442,66 +440,87 @@ public sealed partial class App : Application
             ? "(keine gespeicherte Vorversion)"
             : previousVersion;
 
-        if (!canShowDialog)
-        {
-            Log.Information(
-                "Host update info dialog deferred because no visible window is available. PreviousVersion={PreviousVersion}; CurrentVersion={CurrentVersion}",
-                previousVersionForDisplay,
-                currentVersion);
-            return;
-        }
-
-        var hostContent = await WaitForMainWindowXamlRootAsync();
-        if (hostContent?.XamlRoot is null)
-        {
-            Log.Information(
-                "Host update info dialog deferred because XamlRoot is not ready yet. PreviousVersion={PreviousVersion}; CurrentVersion={CurrentVersion}",
-                previousVersionForDisplay,
-                currentVersion);
-            return;
-        }
-
-        var releaseUrl = BuildReleaseNotesUrl(config);
-        var infoLines = string.Join("\n", new[]
-        {
-            $"Neue Version erkannt: {currentVersion}",
-            $"Vorherige Version: {previousVersionForDisplay}",
-            string.Empty,
-            "Wichtige Hinweise:",
-            "- USB-Funktionalität wurde umfassend überarbeitet.",
-            "- Darstellungs-Fixes im Bereich Anzeige der Netzwerkadapter.",
-            "- Allgemeine Stabilitätsverbesserungen."
-        });
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = hostContent.XamlRoot,
-            Title = "HyperTool wurde aktualisiert",
-            Content = infoLines,
-            PrimaryButtonText = "Release Notes öffnen",
-            CloseButtonText = "Schließen",
-            DefaultButton = ContentDialogButton.Primary
-        };
-
+        var restoreHiddenAfterDialog = false;
         try
         {
-            var result = await dialog.ShowAsync();
-            if (result == ContentDialogResult.Primary)
+            try
             {
-                TryOpenUrl(releaseUrl);
+                if (_mainWindow?.AppWindow is { } appWindow && !appWindow.IsVisible)
+                {
+                    appWindow.Show();
+                    _mainWindow.Activate();
+                    restoreHiddenAfterDialog = _isTrayFunctional && _minimizeToTray;
+                }
+            }
+            catch
+            {
+            }
+
+            var hostContent = await WaitForMainWindowXamlRootAsync();
+            if (hostContent?.XamlRoot is null)
+            {
+                Log.Information(
+                    "Host update info dialog deferred because XamlRoot is not ready yet. PreviousVersion={PreviousVersion}; CurrentVersion={CurrentVersion}",
+                    previousVersionForDisplay,
+                    currentVersion);
+                return;
+            }
+
+            var releaseUrl = BuildReleaseNotesUrl(config);
+            var infoLines = string.Join("\n", new[]
+            {
+                $"Neue Version erkannt: {currentVersion}",
+                $"Vorherige Version: {previousVersionForDisplay}",
+                string.Empty,
+                "Wichtige Hinweise:",
+                "- USB-Funktionalität wurde umfassend überarbeitet.",
+                "- Darstellungs-Fixes im Bereich Anzeige der Netzwerkadapter.",
+                "- Allgemeine Stabilitätsverbesserungen."
+            });
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = hostContent.XamlRoot,
+                Title = "HyperTool wurde aktualisiert",
+                Content = infoLines,
+                PrimaryButtonText = "Release Notes öffnen",
+                CloseButtonText = "Schließen",
+                DefaultButton = ContentDialogButton.Primary
+            };
+
+            try
+            {
+                var result = await dialog.ShowAsync();
+                if (result == ContentDialogResult.Primary)
+                {
+                    TryOpenUrl(releaseUrl);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Could not show host update info dialog.");
+                return;
+            }
+
+            config.LastSeenHostToolVersion = currentVersion;
+            config.LastSeenHostWhatsNewNoticeVersion = CurrentHostWhatsNewNoticeVersion;
+            if (!configService.TrySave(configPath, config, out var errorMessage) && !string.IsNullOrWhiteSpace(errorMessage))
+            {
+                Log.Warning("Could not persist host tool version marker after update info dialog. Error={Error}", errorMessage);
             }
         }
-        catch (Exception ex)
+        finally
         {
-            Log.Warning(ex, "Could not show host update info dialog.");
-            return;
-        }
-
-        config.LastSeenHostToolVersion = currentVersion;
-        config.LastSeenHostWhatsNewNoticeVersion = CurrentHostWhatsNewNoticeVersion;
-        if (!configService.TrySave(configPath, config, out var errorMessage) && !string.IsNullOrWhiteSpace(errorMessage))
-        {
-            Log.Warning("Could not persist host tool version marker after update info dialog. Error={Error}", errorMessage);
+            if (restoreHiddenAfterDialog)
+            {
+                try
+                {
+                    _mainWindow?.AppWindow.Hide();
+                }
+                catch
+                {
+                }
+            }
         }
     }
 

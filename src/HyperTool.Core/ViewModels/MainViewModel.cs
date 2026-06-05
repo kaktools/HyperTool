@@ -5169,8 +5169,12 @@ public partial class MainViewModel : ViewModelBase
     {
         await ExecuteBusyActionAsync("Konfiguration wird gespeichert...", _ =>
         {
+            var existingConfig = _configService.LoadOrCreate(_configPath).Config;
+
             var config = new HyperToolConfig
             {
+                LastSeenHostToolVersion = existingConfig.LastSeenHostToolVersion,
+                LastSeenHostWhatsNewNoticeVersion = existingConfig.LastSeenHostWhatsNewNoticeVersion,
                 DefaultVmName = DefaultVmName,
                 LastSelectedVmName = SelectedVm?.Name ?? LastSelectedVmName,
                 Vms = AvailableVms
