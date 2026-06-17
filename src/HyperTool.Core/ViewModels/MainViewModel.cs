@@ -525,6 +525,9 @@ public partial class MainViewModel : ViewModelBase
     private readonly object _startupReadCacheSync = new();
     private readonly Dictionary<string, (DateTimeOffset CachedAtUtc, IReadOnlyList<HyperVVmNetworkAdapterInfo> Adapters)> _vmNetworkAdaptersRuntimeCacheByVmName = new(StringComparer.OrdinalIgnoreCase);
     private bool _startupReadCacheApplied;
+    private int _consecutiveEmptyVmRefreshCount;
+    private bool _lastVmRefreshReturnedEmpty;
+    private bool _lastVmRefreshEmptyWasConfirmed;
 
     private sealed class VmResourceMonitorRuntimeState
     {
@@ -1617,6 +1620,16 @@ public partial class MainViewModel : ViewModelBase
                     break;
                 }
 
+                if (_lastVmRefreshReturnedEmpty)
+                {
+                    if (_lastVmRefreshEmptyWasConfirmed)
+                    {
+                        break;
+                    }
+
+                    continue;
+                }
+
                 if (AvailableVms.Count > 0)
                 {
                     return;
@@ -1653,6 +1666,32 @@ public partial class MainViewModel : ViewModelBase
         async Task loadAction(CancellationToken token)
         {
             var vms = await _hyperVService.GetVmsAsync(token);
+
+            _lastVmRefreshReturnedEmpty = vms.Count == 0;
+            _lastVmRefreshEmptyWasConfirmed = false;
+
+            if (!_lastVmRefreshReturnedEmpty)
+            {
+                _consecutiveEmptyVmRefreshCount = 0;
+                ApplyRuntimeVmSnapshot(vms, showSuccessNotification);
+                if (persistStartupCache)
+                {
+                    UpdateStartupReadCache(vms: vms);
+                }
+
+                return;
+            }
+
+            _consecutiveEmptyVmRefreshCount++;
+            _lastVmRefreshEmptyWasConfirmed = _consecutiveEmptyVmRefreshCount >= 2;
+
+            if (!_lastVmRefreshEmptyWasConfirmed)
+            {
+                Log.Warning(
+                    "Hyper-V VM refresh returned an empty list. Keeping previous VM snapshot until a second consecutive empty refresh confirms it.");
+                return;
+            }
+
             ApplyRuntimeVmSnapshot(vms, showSuccessNotification);
             if (persistStartupCache)
             {

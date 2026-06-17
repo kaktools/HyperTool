@@ -4,10 +4,10 @@ HyperTool ist ein WinUI-3 Toolset für Hyper-V-Host und Windows-Guest mit Fokus 
 
 ## Aktueller Release-Stand
 
-- Version: **v2.6.7**
-- USB-Funktionalität zwischen Host und Guest wurde umfassend überarbeitet (stabilere Connect-/Attach-Abläufe, weniger Refresh-Flapping).
-- Anzeige-Fixes im Bereich Netzwerkadapter (Host/Guest), inklusive robusterem Lade- und Sync-Verhalten.
-- Allgemeine Stabilitätsverbesserungen in Startup-, Push- und Shutdown-Pfaden.
+- Version: **v2.6.8**
+- Hyper-V VM-Liste beim Start robuster: leere Live-Ergebnisse werden erst nach zweiter Bestätigung übernommen.
+- Startup-Cache wird bei transient leerer VM-Abfrage nicht mehr sofort mit einer leeren Liste überschrieben.
+- Hinweisdialog beim ersten Start nach Update auf den aktuellen Release-Stand angepasst.
 
 ## Projekte
 

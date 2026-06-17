@@ -32,7 +32,7 @@ namespace HyperTool.WinUI;
 
 public sealed partial class App : Application
 {
-    private const string CurrentHostWhatsNewNoticeVersion = "2026-06-usb-network-stability-v1";
+    private const string CurrentHostWhatsNewNoticeVersion = "2026-06-v268-vm-refresh-confirmation-v1";
     private const int HostUsbAutoRefreshFastSeconds = 2;
     private const int HostUsbAutoRefreshSlowSeconds = 3;
     private static readonly TimeSpan HostHyperVMonitorHeartbeatInterval = TimeSpan.FromMinutes(1);
@@ -473,9 +473,9 @@ public sealed partial class App : Application
                 $"Vorherige Version: {previousVersionForDisplay}",
                 string.Empty,
                 "Wichtige Hinweise:",
-                "- USB-Funktionalität wurde umfassend überarbeitet.",
-                "- Darstellungs-Fixes im Bereich Anzeige der Netzwerkadapter.",
-                "- Allgemeine Stabilitätsverbesserungen."
+                "- Leere Hyper-V VM-Listen werden erst nach zweiter Bestätigung übernommen.",
+                "- Startup-Cache wird nicht mehr sofort mit einer transient leeren VM-Liste überschrieben.",
+                "- Stabilitäts- und Update-Hinweisdialog-Anpassungen für den ersten Start nach Update."
             });
 
             var dialog = new ContentDialog

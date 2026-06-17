@@ -26,7 +26,7 @@ namespace HyperTool.Guest;
 
 public sealed partial class App : Application
 {
-    private const string CurrentGuestWhatsNewNoticeVersion = "2026-06-usb-network-stability-v1";
+    private const string CurrentGuestWhatsNewNoticeVersion = "2026-06-v268-vm-refresh-confirmation-v1";
     private const int GuestUsbAutoRefreshFastSeconds = 20;
     private const int GuestUsbAutoRefreshSlowSeconds = 30;
     private const int GuestUsbAutoRefreshNoAutoConnectSeconds = 10;
@@ -1747,9 +1747,9 @@ public sealed partial class App : Application
                 $"Vorherige Version: {previousVersionForDisplay}",
                 string.Empty,
                 "Wichtige Hinweise:",
-                "- USB-Funktionalität wurde umfassend überarbeitet.",
-                "- Darstellungs-Fixes im Bereich Anzeige der Netzwerkadapter.",
-                "- Allgemeine Stabilitätsverbesserungen."
+                "- Leere Hyper-V VM-Listen werden erst nach zweiter Bestätigung übernommen.",
+                "- Startup-Cache wird nicht mehr sofort mit einer transient leeren VM-Liste überschrieben.",
+                "- Stabilitäts- und Update-Hinweisdialog-Anpassungen für den ersten Start nach Update."
             });
 
             var dialog = new ContentDialog
