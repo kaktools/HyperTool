@@ -2,6 +2,22 @@
 
 ## v2.6.8
 
+### Stabilität
+
+- Allgemeine Stabilitätsverbesserungen in Startup-, Push-, Refresh- und Shutdown-Pfaden.
+
+### Behoben
+
+- Host VM-Startup-Cache:
+	- Eine leere Live-VM-Liste wird nicht mehr sofort in den Startup-Cache geschrieben.
+	- Eine leere Live-VM-Liste wird erst nach einem zweiten bestätigten Refresh übernommen, um transiente Leerläufe nach Updates robuster abzufangen.
+
+### Doku
+
+- README auf v2.6.8 aktualisiert.
+
+## v2.6.7
+
 ### Highlights
 
 - USB-Funktionalität zwischen Host und Guest wurde umfassend überarbeitet.
@@ -23,24 +39,16 @@
 - Host Netzwerkprofil-Umschaltung (Public/Private):
 	- Robusteres Elevation-Handling.
 	- Klarere und besser nachvollziehbare Fehlerdiagnosen.
-- Update-Hinweisdialog beim ersten Start nach einem Versionswechsel auf den aktuellen Release-Stand aktualisiert (Host/Guest).
 
 ### Stabilität
 
 - Allgemeine Stabilitätsverbesserungen in Startup-, Push-, Refresh- und Shutdown-Pfaden.
 - Weniger Fehlerkaskaden bei parallelen Hintergrundaktionen und Übergangszuständen.
 
-### Behoben
-
-- Host VM-Startup-Cache:
-	- Eine leere Live-VM-Liste wird nicht mehr sofort in den Startup-Cache geschrieben.
-	- Eine leere Live-VM-Liste wird erst nach einem zweiten bestätigten Refresh übernommen, um transiente Leerläufe nach Updates robuster abzufangen.
-
 ### Doku
 
-- README auf v2.6.8 aktualisiert.
-
-
+- README auf v2.6.7 aktualisiert.
+  
 ## v2.6.6
 
 ### Highlights
