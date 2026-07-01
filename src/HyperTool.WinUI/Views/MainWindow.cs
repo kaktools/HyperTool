@@ -208,6 +208,7 @@ public sealed class MainWindow : Window
     private MediaPlayer? _logoSpinPlayer;
     private DispatcherQueueTimer? _vmChipRefreshDebounceTimer;
     private DispatcherQueueTimer? _vmChipAutoRefreshTimer;
+    private DispatcherQueueTimer? _vmAdapterCardsRefreshDebounceTimer;
     private DateTimeOffset _lastVmRuntimeAutoRefreshUtc = DateTimeOffset.MinValue;
     private bool _vmRuntimeAutoRefreshInProgress;
     private string _vmChipRefreshSignature = string.Empty;
@@ -278,6 +279,13 @@ public sealed class MainWindow : Window
                     _vmChipRefreshDebounceTimer?.Stop();
                     RefreshVmChips();
                 };
+                _vmAdapterCardsRefreshDebounceTimer = DispatcherQueue.CreateTimer();
+                _vmAdapterCardsRefreshDebounceTimer.Interval = TimeSpan.FromMilliseconds(120);
+                _vmAdapterCardsRefreshDebounceTimer.Tick += (_, _) =>
+                {
+                    _vmAdapterCardsRefreshDebounceTimer?.Stop();
+                    RefreshVmAdapterCards();
+                };
                 _vmChipAutoRefreshTimer = DispatcherQueue.CreateTimer();
                 _vmChipAutoRefreshTimer.Interval = TimeSpan.FromMilliseconds(1800);
                 _vmChipAutoRefreshTimer.Tick += (_, _) =>
@@ -297,7 +305,7 @@ public sealed class MainWindow : Window
         if (!showStartupSplash)
         {
             RequestVmChipsRefresh();
-            RefreshVmAdapterCards();
+            RequestVmAdapterCardsRefresh();
         }
 
         Closed += OnWindowClosed;
@@ -350,7 +358,7 @@ public sealed class MainWindow : Window
         _startupMainLayout = null;
         _startupSplash = null;
         RequestVmChipsRefresh();
-        RefreshVmAdapterCards();
+        RequestVmAdapterCardsRefresh();
     }
 
     private async Task TryRefreshVmRuntimeStateInBackgroundAsync()
@@ -422,7 +430,7 @@ public sealed class MainWindow : Window
         _startupSplash = null;
 
         RequestVmChipsRefresh();
-        RefreshVmAdapterCards();
+        RequestVmAdapterCardsRefresh();
     }
 
     private Grid BuildWindowHost(UIElement initialMainContent)
@@ -2279,6 +2287,22 @@ public sealed class MainWindow : Window
         return Content is FrameworkElement root ? root.XamlRoot : null;
     }
 
+    private async Task<XamlRoot?> WaitForDialogXamlRootAsync()
+    {
+        for (var attempt = 0; attempt < 30; attempt++)
+        {
+            var xamlRoot = TryGetDialogXamlRoot();
+            if (xamlRoot is not null)
+            {
+                return xamlRoot;
+            }
+
+            await Task.Delay(120);
+        }
+
+        return null;
+    }
+
     private void OnStartupUpdateAvailable(object? sender, EventArgs args)
     {
         RunOnUiThread(() => _ = ShowStartupUpdatePromptAsync());
@@ -2303,9 +2327,10 @@ public sealed class MainWindow : Window
                 await Task.Delay(120);
             }
 
-            var xamlRoot = TryGetDialogXamlRoot();
+            var xamlRoot = await WaitForDialogXamlRootAsync();
             if (xamlRoot is null)
             {
+                Log.Debug("Startup update prompt skipped because XamlRoot is not ready yet.");
                 return;
             }
 
@@ -4640,7 +4665,6 @@ public sealed class MainWindow : Window
             var disconnectButton = CreateIconButton("⛔", "Disconnect", compact: true, onClick: async (_, _) =>
             {
                 await _viewModel.DisconnectAdapterByNameCommand.ExecuteAsync(adapter.Name);
-                RefreshVmAdapterCards();
             });
             Grid.SetColumn(disconnectButton, 1);
             topRow.Children.Add(disconnectButton);
@@ -4671,7 +4695,6 @@ public sealed class MainWindow : Window
                 var switchButton = CreateIconButton("↔", isActive ? $"{vmSwitch.Name} (Aktiv)" : vmSwitch.Name, compact: true, onClick: async (_, _) =>
                 {
                     await _viewModel.ConnectAdapterToSwitchByKeyCommand.ExecuteAsync($"{adapter.Name}|||{vmSwitch.Name}");
-                    RefreshVmAdapterCards();
                 });
 
                 if (isActive)
@@ -6514,6 +6537,9 @@ public sealed class MainWindow : Window
         _vmChipAutoRefreshTimer?.Stop();
         _vmChipAutoRefreshTimer = null;
 
+        _vmAdapterCardsRefreshDebounceTimer?.Stop();
+        _vmAdapterCardsRefreshDebounceTimer = null;
+
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
         _viewModel.StartupUpdateAvailable -= OnStartupUpdateAvailable;
         _viewModel.AvailableVms.CollectionChanged -= OnAvailableVmsCollectionChanged;
@@ -6534,7 +6560,7 @@ public sealed class MainWindow : Window
     {
         RunOnUiThread(() =>
         {
-            RefreshVmAdapterCards();
+            RequestVmAdapterCardsRefresh();
         });
     }
 
@@ -6549,6 +6575,17 @@ public sealed class MainWindow : Window
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         RunOnUiThread(() => HandleViewModelPropertyChangedOnUiThread(e));
+    }
+
+    private void RequestVmAdapterCardsRefresh()
+    {
+        if (!_isMainLayoutLoaded)
+        {
+            return;
+        }
+
+        _vmAdapterCardsRefreshDebounceTimer?.Stop();
+        _vmAdapterCardsRefreshDebounceTimer?.Start();
     }
 
     private void HandleViewModelPropertyChangedOnUiThread(PropertyChangedEventArgs e)
@@ -6583,7 +6620,7 @@ public sealed class MainWindow : Window
             if (_isMainLayoutLoaded)
             {
                 RequestVmChipsRefresh();
-                RefreshVmAdapterCards();
+                RequestVmAdapterCardsRefresh();
             }
         }
 
@@ -6595,7 +6632,7 @@ public sealed class MainWindow : Window
 
             if (_isMainLayoutLoaded)
             {
-                RefreshVmAdapterCards();
+                RequestVmAdapterCardsRefresh();
             }
         }
 
@@ -7286,7 +7323,7 @@ public sealed class MainWindow : Window
         UpdateTitleBarAppearance();
         UpdatePageContent();
         RequestVmChipsRefresh();
-        RefreshVmAdapterCards();
+        RequestVmAdapterCardsRefresh();
     }
 
     public void RebuildLayoutForCurrentTheme()

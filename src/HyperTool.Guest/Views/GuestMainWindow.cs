@@ -5491,14 +5491,15 @@ internal sealed class GuestMainWindow : Window
                     await Task.Delay(120);
                 }
 
-                if (Content is not FrameworkElement root || root.XamlRoot is null)
+                var xamlRoot = await WaitForDialogXamlRootAsync();
+                if (xamlRoot is null)
                 {
                     return;
                 }
 
                 var dialog = new ContentDialog
                 {
-                    XamlRoot = root.XamlRoot,
+                    XamlRoot = xamlRoot,
                     Title = "Update verfügbar",
                     Content = "Für HyperTool Guest ist ein Update verfügbar. Soll das Update jetzt installiert werden?",
                     PrimaryButtonText = "Jetzt installieren",
@@ -5523,6 +5524,21 @@ internal sealed class GuestMainWindow : Window
                 }
             }
         });
+    }
+
+    private async Task<XamlRoot?> WaitForDialogXamlRootAsync()
+    {
+        for (var attempt = 0; attempt < 30; attempt++)
+        {
+            if (Content is FrameworkElement root && root.XamlRoot is not null)
+            {
+                return root.XamlRoot;
+            }
+
+            await Task.Delay(120);
+        }
+
+        return null;
     }
 
     private Task ExecuteOnUiThreadAsync(Func<Task> action)

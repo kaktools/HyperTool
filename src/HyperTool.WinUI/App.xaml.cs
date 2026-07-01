@@ -32,7 +32,7 @@ namespace HyperTool.WinUI;
 
 public sealed partial class App : Application
 {
-    private const string CurrentHostWhatsNewNoticeVersion = "2026-06-v268-vm-refresh-confirmation-v1";
+    private const string CurrentHostWhatsNewNoticeVersion = "2026-07-v269-performance-refresh-v2";
     private const int HostUsbAutoRefreshFastSeconds = 2;
     private const int HostUsbAutoRefreshSlowSeconds = 3;
     private static readonly TimeSpan HostHyperVMonitorHeartbeatInterval = TimeSpan.FromMinutes(1);
@@ -430,7 +430,9 @@ public sealed partial class App : Application
             CurrentHostWhatsNewNoticeVersion,
             StringComparison.OrdinalIgnoreCase);
 
-        var versionChanged = !string.Equals(previousVersion, currentVersion, StringComparison.OrdinalIgnoreCase);
+        var previousVersionNormalized = NormalizeVersionForComparison(previousVersion);
+        var currentVersionNormalized = NormalizeVersionForComparison(currentVersion);
+        var versionChanged = !string.Equals(previousVersionNormalized, currentVersionNormalized, StringComparison.OrdinalIgnoreCase);
         if (!versionChanged && !shouldShowWhatsNewNotice)
         {
             return;
@@ -473,9 +475,9 @@ public sealed partial class App : Application
                 $"Vorherige Version: {previousVersionForDisplay}",
                 string.Empty,
                 "Wichtige Hinweise:",
-                "- Leere Hyper-V VM-Listen werden erst nach zweiter Bestätigung übernommen.",
-                "- Startup-Cache wird nicht mehr sofort mit einer transient leeren VM-Liste überschrieben.",
-                "- Stabilitäts- und Update-Hinweisdialog-Anpassungen für den ersten Start nach Update."
+                "- Netzwerk/Switch-Refresh mit vielen VMs wurde beschleunigt (mehr zielgerichtete Einzelabfragen statt Voll-Liste).",
+                "- Guest->Host Netzwerkwechsel aktualisiert jetzt Host-Menü, Status-Chips und Tray konsistent.",
+                "- Startup- und Tray-Caches liefern schneller sichtbare Daten, Live-Refresh läuft im Hintergrund nach."
             });
 
             var dialog = new ContentDialog
@@ -502,7 +504,7 @@ public sealed partial class App : Application
                 return;
             }
 
-            config.LastSeenHostToolVersion = currentVersion;
+            config.LastSeenHostToolVersion = currentVersionNormalized;
             config.LastSeenHostWhatsNewNoticeVersion = CurrentHostWhatsNewNoticeVersion;
             if (!configService.TrySave(configPath, config, out var errorMessage) && !string.IsNullOrWhiteSpace(errorMessage))
             {
@@ -567,6 +569,38 @@ public sealed partial class App : Application
         {
             return string.Empty;
         }
+    }
+
+    private static string NormalizeVersionForComparison(string? versionText)
+    {
+        var normalized = (versionText ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return string.Empty;
+        }
+
+        normalized = normalized.Split('+')[0].Trim();
+        if (normalized.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[1..].Trim();
+        }
+
+        var parts = normalized
+            .Split('.', StringSplitOptions.RemoveEmptyEntries)
+            .Select(part => int.TryParse(part, out var value) ? value : -1)
+            .ToList();
+
+        if (parts.Count < 2 || parts.Count > 4 || parts.Any(value => value < 0))
+        {
+            return normalized;
+        }
+
+        while (parts.Count > 3 && parts[^1] == 0)
+        {
+            parts.RemoveAt(parts.Count - 1);
+        }
+
+        return string.Join('.', parts);
     }
 
     private static string BuildReleaseNotesUrl(HyperToolConfig config)

@@ -4,11 +4,11 @@ setlocal enabledelayedexpansion
 set "ROOT=%~dp0"
 cd /d "%ROOT%"
 
-set "VERSION=2.6.8"
+set "VERSION=2.6.9"
 set "NO_PAUSE=false"
 set "VERSION_ARG="
 set "EXPECT_VERSION_VALUE=false"
-set "VERSION_PROMPT=Bitte Version fuer alle Installer eingeben (Default 2.6.8): "
+set "VERSION_PROMPT=Bitte Version fuer alle Installer eingeben (Default 2.6.9): "
 
 for %%A in (%*) do (
     set "ARG=%%~A"
@@ -29,7 +29,7 @@ if defined VERSION_ARG (
     set /p "VERSION=!VERSION_PROMPT!"
 )
 
-if not defined VERSION set "VERSION=2.6.8"
+if not defined VERSION set "VERSION=2.6.9"
 
 for /f "tokens=* delims= " %%V in ("%VERSION%") do set "VERSION=%%V"
 if /I "%VERSION:~0,1%"=="v" set "VERSION=%VERSION:~1%"
@@ -38,7 +38,7 @@ if "%VERSION:~0,1%"=="." set "VERSION=%VERSION:~1%"
 echo %VERSION%| findstr /R /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul
 if errorlevel 1 (
     echo.
-    echo FEHLER: Ungueltige Versionszeichenfolge '%VERSION%'. Erwartet wird z.B. 2.6.8 oder 2.6.8.9
+    echo FEHLER: Ungueltige Versionszeichenfolge '%VERSION%'. Erwartet wird z.B. 2.6.9 oder 2.6.9.9
     if /I "%NO_PAUSE%"=="false" pause
     exit /b 1
 )

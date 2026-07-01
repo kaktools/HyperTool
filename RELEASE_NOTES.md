@@ -1,5 +1,30 @@
 # HyperTool Release Notes
 
+## v2.6.9
+
+### Behoben
+
+- Update-Popup Host/Guest:
+	- Startdialoge für verfügbare Updates warten robuster auf ein verfügbares XamlRoot, damit sie nach dem Start wieder zuverlässig angezeigt werden.
+	- Versionsvergleich für "erste Ausführung nach Update" wurde normalisiert (z. B. `2.6.8` vs. `2.6.8.0`), damit Versionswechsel korrekt erkannt werden.
+- VM-Menü Netzwerk & Adapter:
+	- Bereich lädt nach Cache-Treffern jetzt zusätzlich einen Live-Refresh im Hintergrund und übernimmt den frischen Zustand automatisch.
+	- Gleichzeitige Mehrfach-Live-Refreshes pro VM werden verhindert, damit Anzeige und Reaktionszeit stabil bleiben.
+	- Guest-seitig ausgelöste Adapter-/Switch-Wechsel aktualisieren jetzt im Host konsistent alle Flächen: Netzwerk-&-Adapter-Menü, Status-Chips und Tasktray-Menüs.
+
+### Verbessert
+
+- Hinweisdialoge "Was ist neu" für Host und Guest auf Release-Stand `v2.6.9` angehoben.
+- Performance bei vielen VMs:
+	- VM-ID-basierte Einzelabfragen wurden in kritischen Host-Pfaden ergänzt, um teure Voll-Scans zu vermeiden.
+	- Tray-Refresh im Host aktualisiert bevorzugt nur konfigurierte Tray-/Default-/selektierte VMs und fällt nur bei Bedarf auf Vollabfrage zurück.
+	- Guest->Host VM-Auflösung für Netzwerkkommandos nutzt bevorzugt VM-ID-Lookup und reduziert damit Latenz bei großen VM-Beständen.
+
+### Doku
+
+- README auf v2.6.9 aktualisiert.
+- Build-/Installer-Defaults auf v2.6.9 aktualisiert (Host, Guest, Guestx86).
+
 ## v2.6.8
 
 ### Stabilität

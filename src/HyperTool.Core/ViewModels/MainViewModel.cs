@@ -46,6 +46,9 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan GuestVmNetworkSwitchCacheTtl = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan GuestVmNetworkResolutionCacheTtl = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan VmNetworkAdapterRuntimeCacheTtl = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan VmNetworkAdapterLiveRefreshMinInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan VmNetworkAdapterWarmupTimeout = TimeSpan.FromSeconds(4);
+    private const int StartupVmNetworkAdapterWarmupLimit = 6;
     private const string StartupReadCacheSchemaVersion = "1";
     private static readonly TimeSpan StartupReadCacheMaxAge = TimeSpan.FromHours(12);
     private const int UsbStaleExportHintEscalationCount = 2;
@@ -55,6 +58,7 @@ public partial class MainViewModel : ViewModelBase
     private static readonly TimeSpan RemovedSharedUsbUnshareMinAge = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan MonitorAgentTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan HostMonitorTimeout = TimeSpan.FromSeconds(8);
+    private const int TrayScopedVmRefreshMaxCount = 8;
 
     [ObservableProperty]
     private string _windowTitle = "HyperTool";
@@ -524,6 +528,9 @@ public partial class MainViewModel : ViewModelBase
     private GuestVmNetworkCommandVmResolution? _cachedGuestVmResolution;
     private readonly object _startupReadCacheSync = new();
     private readonly Dictionary<string, (DateTimeOffset CachedAtUtc, IReadOnlyList<HyperVVmNetworkAdapterInfo> Adapters)> _vmNetworkAdaptersRuntimeCacheByVmName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _vmNetworkLiveRefreshSync = new();
+    private readonly HashSet<string> _vmNetworkLiveRefreshPendingByVmName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _vmNetworkLiveRefreshLastStartedByVmName = new(StringComparer.OrdinalIgnoreCase);
     private bool _startupReadCacheApplied;
     private int _consecutiveEmptyVmRefreshCount;
     private bool _lastVmRefreshReturnedEmpty;
@@ -1496,6 +1503,41 @@ public partial class MainViewModel : ViewModelBase
             _startupReadCacheApplied = true;
         }
 
+        if (cache.VmNetworkAdapters.Count > 0)
+        {
+            foreach (var entry in cache.VmNetworkAdapters)
+            {
+                var vmName = (entry?.VmName ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(vmName))
+                {
+                    continue;
+                }
+
+                var normalizedAdapters = NormalizeVmNetworkAdapters(entry?.Adapters ?? []);
+                if (normalizedAdapters.Count == 0)
+                {
+                    continue;
+                }
+
+                UpdateVmNetworkAdapterRuntimeCache(vmName, normalizedAdapters);
+            }
+
+            _startupReadCacheApplied = true;
+        }
+
+        // Apply cached adapter state for the currently selected VM immediately so the
+        // network section is populated before slower live Hyper-V refreshes finish.
+        if (SelectedVm is not null
+            && TryGetStartupCachedVmNetworkAdapters(SelectedVm.Name, out var cachedSelectedVmAdapters))
+        {
+            ApplyVmNetworkAdaptersToSelection(
+                SelectedVm.Name,
+                cachedSelectedVmAdapters,
+                SelectedVmNetworkAdapter?.Name,
+                showNotificationOnMissingSwitch: false);
+            _startupReadCacheApplied = true;
+        }
+
         if (_startupReadCacheApplied)
         {
             AddNotification("Startup-Cache geladen. Live-Refresh läuft im Hintergrund.", "Info");
@@ -1506,9 +1548,17 @@ public partial class MainViewModel : ViewModelBase
     {
         try
         {
+            // Prioritize VM + adapter/switch visibility first.
             await LoadVmsFromHyperVWithRetryAsync(showSuccessNotification: !_startupReadCacheApplied, useBusyIndicator: false, persistStartupCache: true);
-            await RefreshSwitchesAsync(showSuccessNotification: !_startupReadCacheApplied, useBusyIndicator: false, persistStartupCache: true);
-            await EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+
+            // Warm cache for selected/tray VMs in background so tray network menus open faster.
+            _ = WarmVmNetworkAdapterCacheForPriorityVmsAsync();
+
+            var selectedVmNetworkTask = EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
+            var switchesTask = RefreshSwitchesAsync(showSuccessNotification: !_startupReadCacheApplied, useBusyIndicator: false, persistStartupCache: true);
+            await Task.WhenAll(selectedVmNetworkTask, switchesTask);
+
+            // Secondary startup data can complete afterward.
             await RefreshHostNetworkProfileAsync();
             await WarmHostNetworkAdapterCacheAsync();
             await RefreshVmStatusAsync();
@@ -1520,6 +1570,69 @@ public partial class MainViewModel : ViewModelBase
         catch (Exception ex)
         {
             Log.Warning(ex, "Startup background refresh failed.");
+        }
+    }
+
+    private async Task WarmVmNetworkAdapterCacheForPriorityVmsAsync()
+    {
+        try
+        {
+            var priorityVmNames = new List<string>();
+
+            if (SelectedVm is not null && !string.IsNullOrWhiteSpace(SelectedVm.Name))
+            {
+                priorityVmNames.Add(SelectedVm.Name.Trim());
+            }
+
+            if (_trayVmNames.Count > 0)
+            {
+                priorityVmNames.AddRange(_trayVmNames.Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name.Trim()));
+            }
+
+            if (priorityVmNames.Count == 0)
+            {
+                priorityVmNames.AddRange(AvailableVms.Select(vm => vm.Name).Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name.Trim()));
+            }
+
+            var dedupedVmNames = priorityVmNames
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(StartupVmNetworkAdapterWarmupLimit)
+                .ToList();
+
+            foreach (var vmName in dedupedVmNames)
+            {
+                if (TryGetFreshVmNetworkAdapterRuntimeCache(vmName, out _))
+                {
+                    continue;
+                }
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCancellation.Token);
+                timeoutCts.CancelAfter(VmNetworkAdapterWarmupTimeout);
+
+                IReadOnlyList<HyperVVmNetworkAdapterInfo> adapters;
+                try
+                {
+                    adapters = await _hyperVService.GetVmNetworkAdaptersAsync(vmName, timeoutCts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    continue;
+                }
+
+                var normalizedAdapters = NormalizeVmNetworkAdapters(adapters);
+                if (normalizedAdapters.Count == 0)
+                {
+                    continue;
+                }
+
+                UpdateVmNetworkAdapterRuntimeCache(vmName, normalizedAdapters);
+                UpdateStartupReadCache(vmNetworkAdaptersVmName: vmName, vmNetworkAdapters: normalizedAdapters);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Startup VM network adapter cache warm-up failed.");
         }
     }
 
@@ -3669,19 +3782,53 @@ public partial class MainViewModel : ViewModelBase
         {
             var selectedVmName = SelectedVm.Name;
             var previouslySelectedAdapterName = SelectedVmNetworkAdapter?.Name;
+            var appliedFromCache = false;
 
             if (TryGetFreshVmNetworkAdapterRuntimeCache(selectedVmName, out var cachedRuntimeAdapters))
             {
                 ApplyVmNetworkAdaptersToSelection(selectedVmName, cachedRuntimeAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch);
+                appliedFromCache = true;
+            }
+
+            if (!appliedFromCache && TryGetStartupCachedVmNetworkAdapters(selectedVmName, out var cachedStartupAdapters))
+            {
+                ApplyVmNetworkAdaptersToSelection(selectedVmName, cachedStartupAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch: false);
+                appliedFromCache = true;
+            }
+
+            if (appliedFromCache)
+            {
+                if (TryMarkVmNetworkLiveRefreshPending(selectedVmName, force: false))
+                {
+                    _ = RefreshSelectedVmNetworkSelectionFromLiveAsync(
+                        selectedVmName,
+                        previouslySelectedAdapterName,
+                        showNotificationOnMissingSwitch);
+                }
+
                 return;
             }
 
-            if (TryGetStartupCachedVmNetworkAdapters(selectedVmName, out var cachedStartupAdapters))
+            var adaptersTask = _hyperVService.GetVmNetworkAdaptersAsync(selectedVmName, _lifetimeCancellation.Token);
+            var foregroundTimeoutTask = Task.Delay(TimeSpan.FromSeconds(4), _lifetimeCancellation.Token);
+            var completedTask = await Task.WhenAny(adaptersTask, foregroundTimeoutTask);
+
+            if (completedTask != adaptersTask)
             {
-                ApplyVmNetworkAdaptersToSelection(selectedVmName, cachedStartupAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch: false);
+                NetworkSwitchStatusHint = "Netzwerkdaten werden im Hintergrund geladen...";
+
+                if (TryMarkVmNetworkLiveRefreshPending(selectedVmName, force: true))
+                {
+                    _ = RefreshSelectedVmNetworkSelectionFromLiveAsync(
+                        selectedVmName,
+                        previouslySelectedAdapterName,
+                        showNotificationOnMissingSwitch);
+                }
+
+                return;
             }
 
-            var adapters = await _hyperVService.GetVmNetworkAdaptersAsync(selectedVmName, _lifetimeCancellation.Token);
+            var adapters = await adaptersTask;
 
             if (SelectedVm is null || !string.Equals(SelectedVm.Name, selectedVmName, StringComparison.OrdinalIgnoreCase))
             {
@@ -3696,6 +3843,80 @@ public partial class MainViewModel : ViewModelBase
         catch (Exception ex)
         {
             Log.Warning(ex, "Netzwerkkarten für VM {VmName} konnten nicht gelesen werden.", SelectedVm.Name);
+        }
+    }
+
+    private async Task RefreshSelectedVmNetworkSelectionFromLiveAsync(
+        string selectedVmName,
+        string? previouslySelectedAdapterName,
+        bool showNotificationOnMissingSwitch)
+    {
+        try
+        {
+            var adapters = await _hyperVService.GetVmNetworkAdaptersAsync(selectedVmName, _lifetimeCancellation.Token);
+
+            if (SelectedVm is null || !string.Equals(SelectedVm.Name, selectedVmName, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            var normalizedAdapters = NormalizeVmNetworkAdapters(adapters);
+            UpdateVmNetworkAdapterRuntimeCache(selectedVmName, normalizedAdapters);
+            UpdateStartupReadCache(vmNetworkAdaptersVmName: selectedVmName, vmNetworkAdapters: normalizedAdapters);
+            ApplyVmNetworkAdaptersToSelection(selectedVmName, normalizedAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch);
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Live refresh der VM-Netzwerkkarten im Hintergrund fehlgeschlagen. VmName={VmName}", selectedVmName);
+        }
+        finally
+        {
+            UnmarkVmNetworkLiveRefreshPending(selectedVmName);
+        }
+    }
+
+    private bool TryMarkVmNetworkLiveRefreshPending(string vmName, bool force)
+    {
+        var normalizedVmName = (vmName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedVmName))
+        {
+            return false;
+        }
+
+        lock (_vmNetworkLiveRefreshSync)
+        {
+            if (_vmNetworkLiveRefreshPendingByVmName.Contains(normalizedVmName))
+            {
+                return false;
+            }
+
+            if (!force
+                && _vmNetworkLiveRefreshLastStartedByVmName.TryGetValue(normalizedVmName, out var lastStartedAtUtc)
+                && (DateTimeOffset.UtcNow - lastStartedAtUtc) < VmNetworkAdapterLiveRefreshMinInterval)
+            {
+                return false;
+            }
+
+            _vmNetworkLiveRefreshPendingByVmName.Add(normalizedVmName);
+            _vmNetworkLiveRefreshLastStartedByVmName[normalizedVmName] = DateTimeOffset.UtcNow;
+            return true;
+        }
+    }
+
+    private void UnmarkVmNetworkLiveRefreshPending(string vmName)
+    {
+        var normalizedVmName = (vmName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedVmName))
+        {
+            return;
+        }
+
+        lock (_vmNetworkLiveRefreshSync)
+        {
+            _vmNetworkLiveRefreshPendingByVmName.Remove(normalizedVmName);
         }
     }
 
@@ -4029,7 +4250,7 @@ public partial class MainViewModel : ViewModelBase
                     hnsResult.Success ? "Success" : "Error");
             }
         });
-        await RefreshVmStatusAsync();
+        await RefreshVmStatusByNameAsync(SelectedVm.Name);
     }
 
     private async Task DisconnectSwitchAsync()
@@ -4044,7 +4265,7 @@ public partial class MainViewModel : ViewModelBase
             await _hyperVService.DisconnectVmNetworkAdapterAsync(SelectedVm.Name, SelectedVmNetworkAdapter.Name, token);
             AddNotification($"Netzwerkkarte '{GetAdapterDisplayName(SelectedVmNetworkAdapter)}' von '{SelectedVm.Name}' getrennt.", "Warning");
         });
-        await RefreshVmStatusAsync();
+        await RefreshVmStatusByNameAsync(SelectedVm.Name);
     }
 
     private async Task ConnectAdapterToSwitchByKeyAsync(string? adapterSwitchKey)
@@ -6410,11 +6631,8 @@ public partial class MainViewModel : ViewModelBase
 
         try
         {
-            var runtimeVms = await _hyperVService.GetVmsAsync(token);
-            return !runtimeVms.Any(vm =>
-                !string.IsNullOrWhiteSpace(vm.VmId)
-                && string.Equals(NormalizeVmId(vm.VmId), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase)
-                && IsRunningState(vm.State));
+            var runtimeVm = await _hyperVService.GetVmByIdAsync(normalizedSourceVmId, token);
+            return runtimeVm is null || !IsRunningState(runtimeVm.State);
         }
         catch (Exception ex)
         {
@@ -6436,19 +6654,13 @@ public partial class MainViewModel : ViewModelBase
 
         try
         {
-            var runtimeVms = await _hyperVService.GetVmsAsync(token);
             if (!string.IsNullOrWhiteSpace(normalizedSourceVmId))
             {
-                if (runtimeVms.Any(vm =>
-                    !string.IsNullOrWhiteSpace(vm.VmId)
-                    && string.Equals(NormalizeVmId(vm.VmId), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase)
-                    && IsRunningState(vm.State)))
-                {
-                    return true;
-                }
-
-                return false;
+                var runtimeVm = await _hyperVService.GetVmByIdAsync(normalizedSourceVmId, token);
+                return runtimeVm is not null && IsRunningState(runtimeVm.State);
             }
+
+            var runtimeVms = await _hyperVService.GetVmsAsync(token);
 
             return runtimeVms.Any(vm =>
                 !string.IsNullOrWhiteSpace(vm.Name)
@@ -6949,6 +7161,22 @@ public partial class MainViewModel : ViewModelBase
                 string.IsNullOrWhiteSpace(guestComputerName) ? "unknown" : guestComputerName,
                 string.IsNullOrWhiteSpace(sourceVmId) ? "unknown" : sourceVmId);
 
+            // Keep host UI state consistent after guest-triggered switch changes.
+            // This refresh updates the selected VM network/adapters menu in addition to tray/status chips.
+            try
+            {
+                await RefreshVmStatusByNameAsync(resolution.VmName);
+                NotifyTrayStateChanged();
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex,
+                    "Guest-initiated VM switch post-refresh failed. VmName={VmName}; AdapterName={AdapterName}; SwitchName={SwitchName}",
+                    resolution.VmName,
+                    adapterName,
+                    switchName);
+            }
+
             return new GuestVmNetworkSwitchCommandResult
             {
                 Success = true,
@@ -6993,7 +7221,7 @@ public partial class MainViewModel : ViewModelBase
         string guestComputerName,
         CancellationToken cancellationToken)
     {
-        var normalizedSourceVmId = sourceVmId.Trim();
+        var normalizedSourceVmId = NormalizeVmId(sourceVmId);
         var normalizedGuestComputerName = guestComputerName.Trim();
 
         if (TryGetCachedGuestVmNetworkResolution(normalizedSourceVmId, normalizedGuestComputerName, out var cachedResolution))
@@ -7007,7 +7235,7 @@ public partial class MainViewModel : ViewModelBase
         {
             var vmFromConfig = AvailableVms.FirstOrDefault(vm =>
                 !string.IsNullOrWhiteSpace(vm.VmId)
-                && string.Equals(vm.VmId.Trim(), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase));
+                && string.Equals(NormalizeVmId(vm.VmId), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase));
             if (vmFromConfig is not null)
             {
                 var resolution = new GuestVmNetworkCommandVmResolution(
@@ -7020,10 +7248,23 @@ public partial class MainViewModel : ViewModelBase
                 return resolution;
             }
 
+            var vmFromVmIdLookup = await _hyperVService.GetVmByIdAsync(normalizedSourceVmId, cancellationToken);
+            if (vmFromVmIdLookup is not null)
+            {
+                var resolution = new GuestVmNetworkCommandVmResolution(
+                    Success: true,
+                    VmName: vmFromVmIdLookup.Name,
+                    VmId: vmFromVmIdLookup.VmId,
+                    ErrorCode: string.Empty,
+                    Message: string.Empty);
+                UpdateCachedGuestVmNetworkResolution(normalizedSourceVmId, normalizedGuestComputerName, resolution);
+                return resolution;
+            }
+
             runtimeVms = await _hyperVService.GetVmsAsync(cancellationToken);
             var vmFromRuntime = runtimeVms.FirstOrDefault(vm =>
                 !string.IsNullOrWhiteSpace(vm.VmId)
-                && string.Equals(vm.VmId.Trim(), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase));
+                && string.Equals(NormalizeVmId(vm.VmId), normalizedSourceVmId, StringComparison.OrdinalIgnoreCase));
             if (vmFromRuntime is not null)
             {
                 var resolution = new GuestVmNetworkCommandVmResolution(
@@ -7223,8 +7464,7 @@ public partial class MainViewModel : ViewModelBase
         try
         {
             var token = _lifetimeCancellation.Token;
-            var runtimeVms = await _hyperVService.GetVmsAsync(token);
-            UpdateVmRuntimeStates(runtimeVms);
+            await RefreshTrayVmRuntimeStatesAsync(token);
 
             var switches = await _hyperVService.GetVmSwitchesAsync(token);
             AvailableSwitches.Clear();
@@ -7241,6 +7481,76 @@ public partial class MainViewModel : ViewModelBase
         {
             Log.Warning(ex, "Tray runtime refresh failed.");
         }
+    }
+
+    private async Task RefreshTrayVmRuntimeStatesAsync(CancellationToken token)
+    {
+        var targetVmNames = new List<string>();
+        if (_trayVmNames.Count > 0)
+        {
+            targetVmNames.AddRange(_trayVmNames.Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name.Trim()));
+        }
+
+        if (SelectedVm is not null && !string.IsNullOrWhiteSpace(SelectedVm.Name))
+        {
+            targetVmNames.Add(SelectedVm.Name.Trim());
+        }
+
+        if (!string.IsNullOrWhiteSpace(DefaultVmName))
+        {
+            targetVmNames.Add(DefaultVmName.Trim());
+        }
+
+        var dedupedTargetVmNames = targetVmNames
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (dedupedTargetVmNames.Count == 0 || dedupedTargetVmNames.Count > TrayScopedVmRefreshMaxCount)
+        {
+            var runtimeVms = await _hyperVService.GetVmsAsync(token);
+            UpdateVmRuntimeStates(runtimeVms);
+            return;
+        }
+
+        foreach (var vmName in dedupedTargetVmNames)
+        {
+            HyperVVmInfo? runtimeVm = null;
+            try
+            {
+                runtimeVm = await _hyperVService.GetVmAsync(vmName, token);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Tray VM runtime refresh for single VM failed. VmName={VmName}", vmName);
+            }
+
+            var existingVm = AvailableVms.FirstOrDefault(vm =>
+                string.Equals(vm.Name, vmName, StringComparison.OrdinalIgnoreCase));
+
+            if (runtimeVm is not null)
+            {
+                UpdateSingleVmRuntimeState(runtimeVm);
+            }
+            else if (existingVm is not null)
+            {
+                existingVm.RuntimeState = "Nicht gefunden";
+                existingVm.RuntimeSwitchName = NotConnectedSwitchDisplay;
+            }
+        }
+
+        if (SelectedVm is null)
+        {
+            SelectedVmState = "Unbekannt";
+            SelectedVmCurrentSwitch = NotConnectedSwitchDisplay;
+        }
+        else
+        {
+            SelectedVmState = string.IsNullOrWhiteSpace(SelectedVm.RuntimeState) ? "Unbekannt" : SelectedVm.RuntimeState;
+            SelectedVmCurrentSwitch = NormalizeSwitchDisplayName(SelectedVm.RuntimeSwitchName);
+        }
+
+        NotifyTrayStateChanged();
     }
 
     public Task ReloadTrayDataAsync()
@@ -7826,13 +8136,47 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task RefreshVmStatusByNameAsync(string vmName)
     {
+        var normalizedVmName = (vmName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedVmName))
+        {
+            return;
+        }
+
+        InvalidateVmNetworkAdapterRuntimeCache(normalizedVmName);
+
         var currentSelectedVm = SelectedVm;
 
         SetSelectedVmInternal(AvailableVms.FirstOrDefault(vm =>
-                                string.Equals(vm.Name, vmName, StringComparison.OrdinalIgnoreCase))
+                                string.Equals(vm.Name, normalizedVmName, StringComparison.OrdinalIgnoreCase))
                             ?? currentSelectedVm);
 
         await RefreshVmStatusAsync();
+
+        if (SelectedVm is not null
+            && string.Equals(SelectedVm.Name, normalizedVmName, StringComparison.OrdinalIgnoreCase))
+        {
+            await RefreshSelectedVmNetworkSelectionFromLiveAsync(
+                normalizedVmName,
+                SelectedVmNetworkAdapter?.Name,
+                showNotificationOnMissingSwitch: false);
+        }
+    }
+
+    private void InvalidateVmNetworkAdapterRuntimeCache(string vmName)
+    {
+        var normalizedVmName = (vmName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalizedVmName))
+        {
+            return;
+        }
+
+        _vmNetworkAdaptersRuntimeCacheByVmName.Remove(normalizedVmName);
+
+        lock (_vmNetworkLiveRefreshSync)
+        {
+            _vmNetworkLiveRefreshPendingByVmName.Remove(normalizedVmName);
+            _vmNetworkLiveRefreshLastStartedByVmName.Remove(normalizedVmName);
+        }
     }
 
     public void ConfigureResourceMonitoring(bool enabled, int intervalMs, int historyMinutes, int historySize)

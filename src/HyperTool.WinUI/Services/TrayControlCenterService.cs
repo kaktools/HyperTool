@@ -17,7 +17,7 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private static readonly TimeSpan ToggleRefreshInterval = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan BackendRefreshTimeout = TimeSpan.FromSeconds(8);
-    private static readonly TimeSpan VmAdapterRefreshTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan VmAdapterRefreshTimeout = TimeSpan.FromSeconds(4);
 
     private TrayControlCenterWindow? _window;
     private Action? _showMainWindowAction;
@@ -167,7 +167,7 @@ internal sealed class TrayControlCenterService : ITrayControlCenterService
             _window.AppWindow.Show();
             _window.Activate();
 
-            StartBackgroundRefreshIfNeeded(force: true);
+            StartBackgroundRefreshIfNeeded(force: false);
         }
         catch (Exception ex)
         {

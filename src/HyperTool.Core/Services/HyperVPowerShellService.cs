@@ -91,6 +91,51 @@ public sealed class HyperVPowerShellService : IHyperVService
         };
     }
 
+    public async Task<HyperVVmInfo?> GetVmByIdAsync(string vmId, CancellationToken cancellationToken)
+    {
+        var normalizedVmId = (vmId ?? string.Empty).Trim().Trim('{', '}');
+        if (!Guid.TryParse(normalizedVmId, out var parsedVmId))
+        {
+            return null;
+        }
+
+        var vmGuid = parsedVmId.ToString("D");
+        var script =
+            "$vmGuid = [guid]" + ToPsSingleQuoted(vmGuid) + "; " +
+            "$vm = Get-VM -Id $vmGuid -ErrorAction SilentlyContinue; " +
+            "if ($null -eq $vm) { return }; " +
+            "$adapter = Get-VMNetworkAdapter -VMName $vm.Name -ErrorAction SilentlyContinue | Select-Object -First 1; " +
+            "$dvd = Get-VMDvdDrive -VMName $vm.Name -ErrorAction SilentlyContinue | Select-Object -First 1; " +
+            "$dvdPath = if ($null -ne $dvd -and -not [string]::IsNullOrWhiteSpace($dvd.Path)) { $dvd.Path } else { '' }; " +
+            "[pscustomobject]@{ " +
+            "  Name = $vm.Name; " +
+            "  VmId = if ($null -ne $vm.VMId) { $vm.VMId.Guid } else { '' }; " +
+            "  State = $vm.State.ToString(); " +
+            "  Status = $vm.Status; " +
+            "  CurrentSwitchName = if ($null -ne $adapter -and $null -ne $adapter.SwitchName) { $adapter.SwitchName } else { '' }; " +
+            "  HasMountedIso = -not [string]::IsNullOrWhiteSpace($dvdPath); " +
+            "  MountedIsoPath = $dvdPath " +
+            "} | ConvertTo-Json -Depth 4 -Compress";
+
+        var rows = await InvokeJsonArrayAsync(script, cancellationToken);
+        var row = rows.FirstOrDefault();
+        if (row.ValueKind == JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return new HyperVVmInfo
+        {
+            Name = GetString(row, "Name"),
+            VmId = GetString(row, "VmId"),
+            State = GetString(row, "State"),
+            Status = GetString(row, "Status"),
+            CurrentSwitchName = GetString(row, "CurrentSwitchName"),
+            HasMountedIso = GetBoolean(row, "HasMountedIso"),
+            MountedIsoPath = GetString(row, "MountedIsoPath")
+        };
+    }
+
     public async Task<IReadOnlyList<VmHostResourcePacket>> GetVmHostResourceMetricsAsync(CancellationToken cancellationToken)
     {
         const string script = """

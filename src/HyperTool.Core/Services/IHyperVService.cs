@@ -8,6 +8,8 @@ public interface IHyperVService
 
     Task<HyperVVmInfo?> GetVmAsync(string vmName, CancellationToken cancellationToken);
 
+    Task<HyperVVmInfo?> GetVmByIdAsync(string vmId, CancellationToken cancellationToken);
+
     Task<IReadOnlyList<VmHostResourcePacket>> GetVmHostResourceMetricsAsync(CancellationToken cancellationToken);
 
     Task StartVmAsync(string vmName, CancellationToken cancellationToken);
