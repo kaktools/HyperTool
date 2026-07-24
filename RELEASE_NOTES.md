@@ -1,5 +1,40 @@
 # HyperTool Release Notes
 
+## v2.7.1
+
+### Behoben
+
+- Host Installer-Startverhalten nach Installation gehärtet:
+	- Post-Install-Start von `HyperTool.exe` nutzt jetzt ShellExecute im ursprünglichen Benutzerkontext.
+	- Dadurch treten `CreateProcess fehlgeschlagen; Code 5 (Zugriff verweigert)` Meldungen beim Setup-Abschluss in restriktiven Unternehmensumgebungen deutlich seltener auf.
+
+### Hinweis
+
+- Wenn der manuelle Start von `C:\Program Files\HyperTool\HyperTool.exe` weiterhin mit Code 5 blockiert wird, greift sehr wahrscheinlich eine Unternehmensrichtlinie (z. B. WDAC/AppLocker/EDR).
+- In diesem Fall ist zusätzlich eine IT-Freigabe (Publisher/Hash) oder Code-Signing erforderlich.
+
+## v2.7.0
+
+### Behoben
+
+- Host VM-Erkennung:
+	- Retry-Verhalten bei leerer Hyper-V-Liste wurde gehärtet: bestätigte Leerläufe werden bis zum finalen Versuch weiter überprüft.
+	- Wenn Live-Hyper-V temporär leer antwortet, wird die letzte bekannte VM-Liste aus dem Startup-Cache wiederhergestellt statt sofort leer anzuzeigen.
+	- Fallback im Hyper-V-Service ergänzt: falls die detaillierte VM-Abfrage leer zurückkommt, wird zusätzlich eine reduzierte VM-Abfrage ausgeführt.
+
+### Verbessert
+
+- Guest USB-Statusdarstellung:
+	- USB-Geräteansicht zeigt Status als klaren Badge pro Zeile (CONNECTED, ATTACHED, BUSY).
+	- Zeilenhervorhebung pro Zustand wurde verstärkt, damit belegte/verbundene/angehängte Geräte schneller erkennbar sind.
+	- Guest Tray-Control-Center zeigt USB-Geräte mit explizitem Status-Präfix (`[CONNECTED]`, `[ATTACHED]`, `[BUSY]`).
+- Hinweisdialoge "Was ist neu" für Host und Guest auf Release-Stand `v2.7.0` angehoben.
+
+### Doku
+
+- README auf v2.7.0 aktualisiert.
+- Build-/Installer-Defaults auf v2.7.0 aktualisiert (Host, Guest, Guestx86).
+
 ## v2.6.9
 
 ### Behoben

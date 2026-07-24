@@ -381,11 +381,25 @@ internal sealed class GuestTrayControlCenterWindow : Window
 
     private static string BuildUsbComboLabel(UsbIpDeviceInfo usb)
     {
+        var isBusy = usb.IsAttachedByOtherGuest || usb.IsGuestConnectionBlocked;
+        var isAttached = !isBusy && (usb.IsAttachedInCurrentGuest || (usb.IsAttached && !usb.IsAttachedByOtherGuest));
+        var isConnected = !isBusy && !isAttached && usb.IsConnected;
+
+        var statusPrefix = isBusy
+            ? "[BUSY] "
+            : isAttached
+                ? "[ATTACHED] "
+                : isConnected
+                    ? "[CONNECTED] "
+                    : string.Empty;
+
         var label = usb.DisplayName;
         if (string.IsNullOrWhiteSpace(label))
         {
             label = "USB-Gerät";
         }
+
+        label = statusPrefix + label;
 
         if (!string.IsNullOrWhiteSpace(usb.CustomComment)
             && !label.Contains($"({usb.CustomComment.Trim()}", StringComparison.OrdinalIgnoreCase))

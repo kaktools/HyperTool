@@ -32,7 +32,7 @@ namespace HyperTool.WinUI;
 
 public sealed partial class App : Application
 {
-    private const string CurrentHostWhatsNewNoticeVersion = "2026-07-v269-performance-refresh-v2";
+    private const string CurrentHostWhatsNewNoticeVersion = "2026-07-v271-launch-hotfix";
     private const int HostUsbAutoRefreshFastSeconds = 2;
     private const int HostUsbAutoRefreshSlowSeconds = 3;
     private static readonly TimeSpan HostHyperVMonitorHeartbeatInterval = TimeSpan.FromMinutes(1);
@@ -475,9 +475,9 @@ public sealed partial class App : Application
                 $"Vorherige Version: {previousVersionForDisplay}",
                 string.Empty,
                 "Wichtige Hinweise:",
-                "- Netzwerk/Switch-Refresh mit vielen VMs wurde beschleunigt (mehr zielgerichtete Einzelabfragen statt Voll-Liste).",
-                "- Guest->Host Netzwerkwechsel aktualisiert jetzt Host-Menü, Status-Chips und Tray konsistent.",
-                "- Startup- und Tray-Caches liefern schneller sichtbare Daten, Live-Refresh läuft im Hintergrund nach."
+                "- Hyper-V VM-Erkennung im Host wurde robuster: bei transient leeren Antworten werden Retries und Cache-Fallback gezielter genutzt.",
+                "- Netzwerk-/Tray-Refresh bleibt für viele VMs optimiert und reagiert weiterhin mit priorisierten Einzelabfragen.",
+                "- Guest USB-Status (Connected/Attached/Busy) ist klarer hervorgehoben; Zustände sind schneller visuell erkennbar."
             });
 
             var dialog = new ContentDialog

@@ -35,7 +35,28 @@ public sealed class HyperVPowerShellService : IHyperVService
             ) | ConvertTo-Json -Depth 4 -Compress
             """;
 
+        const string fallbackScript = """
+            @(
+                Get-VM -ErrorAction SilentlyContinue | ForEach-Object {
+                    [pscustomobject]@{
+                        Name = $_.Name
+                        VmId = if ($null -ne $_.VMId) { $_.VMId.Guid } else { '' }
+                        State = $_.State.ToString()
+                        Status = $_.Status
+                        CurrentSwitchName = ''
+                        HasMountedIso = $false
+                        MountedIsoPath = ''
+                    }
+                }
+            ) | ConvertTo-Json -Depth 4 -Compress
+            """;
+
         var rows = await InvokeJsonArrayAsync(script, cancellationToken);
+        if (rows.Count == 0)
+        {
+            rows = await InvokeJsonArrayAsync(fallbackScript, cancellationToken);
+        }
+
         return rows.Select(row => new HyperVVmInfo
         {
             Name = GetString(row, "Name"),

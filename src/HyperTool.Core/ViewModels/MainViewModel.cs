@@ -1426,6 +1426,11 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task InitializeAsync()
     {
+        LogHostDebug("host.init.begin SelectedMenuIndex={SelectedMenuIndex}; UpdateCheckOnStartup={UpdateCheckOnStartup}; TrayVmCount={TrayVmCount}",
+            SelectedMenuIndex,
+            UpdateCheckOnStartup,
+            _trayVmNames.Count);
+
         TryApplyStartupReadCache();
 
         _ = RefreshStartupDataInBackgroundAsync();
@@ -1436,11 +1441,14 @@ public partial class MainViewModel : ViewModelBase
             _ = CheckForUpdatesAsync(isStartupCheck: true);
         }
 
+        LogHostDebug("host.init.scheduled StartupBackgroundRefresh=True; UsbRuntimeRefresh=True; UpdateCheckScheduled={UpdateCheckScheduled}", UpdateCheckOnStartup);
+
         await Task.CompletedTask;
     }
 
     public async Task RefreshUsbRuntimeAvailabilityAsync()
     {
+        LogHostDebug("host.usb.runtime.refresh.begin");
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
@@ -1448,12 +1456,14 @@ public partial class MainViewModel : ViewModelBase
 
             UsbRuntimeAvailable = true;
             UsbRuntimeHintText = string.Empty;
+            LogHostDebug("host.usb.runtime.refresh.ok RuntimeAvailable={RuntimeAvailable}", UsbRuntimeAvailable);
         }
         catch (Exception ex) when (IsUsbRuntimeMissing(ex.Message))
         {
             UsbRuntimeAvailable = false;
             UsbRuntimeHintText = "USB-Funktion deaktiviert: usbipd-win ist nicht installiert. Quelle: https://github.com/dorssel/usbipd-win";
             UsbStatusText = BuildUsbUnavailableStatus(ex.Message);
+            LogHostDebug("host.usb.runtime.refresh.missing Message={Message}", ex.Message);
 
             if (HostUsbSharingEnabled)
             {
@@ -1462,6 +1472,7 @@ public partial class MainViewModel : ViewModelBase
         }
         catch
         {
+            LogHostDebug("host.usb.runtime.refresh.failed.unknown");
         }
     }
 
@@ -1546,26 +1557,35 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task RefreshStartupDataInBackgroundAsync()
     {
+        LogHostDebug("host.startup.refresh.begin StartupCacheApplied={StartupCacheApplied}", _startupReadCacheApplied);
         try
         {
             // Prioritize VM + adapter/switch visibility first.
             await LoadVmsFromHyperVWithRetryAsync(showSuccessNotification: !_startupReadCacheApplied, useBusyIndicator: false, persistStartupCache: true);
+            LogHostDebug("host.startup.refresh.vms.done VmCount={VmCount}", AvailableVms.Count);
 
             // Warm cache for selected/tray VMs in background so tray network menus open faster.
             _ = WarmVmNetworkAdapterCacheForPriorityVmsAsync();
+            LogHostDebug("host.startup.refresh.adapterwarmup.scheduled");
 
             var selectedVmNetworkTask = EnsureSelectedVmNetworkSelectionAsync(showNotificationOnMissingSwitch: false);
             var switchesTask = RefreshSwitchesAsync(showSuccessNotification: !_startupReadCacheApplied, useBusyIndicator: false, persistStartupCache: true);
             await Task.WhenAll(selectedVmNetworkTask, switchesTask);
+            LogHostDebug("host.startup.refresh.network.done SelectedVm={SelectedVm}; AdapterCount={AdapterCount}; SwitchCount={SwitchCount}",
+                SelectedVm?.Name ?? "<none>",
+                AvailableVmNetworkAdapters.Count,
+                AvailableSwitches.Count);
 
             // Secondary startup data can complete afterward.
             await RefreshHostNetworkProfileAsync();
             await WarmHostNetworkAdapterCacheAsync();
             await RefreshVmStatusAsync();
             await LoadCheckpointsAsync();
+            LogHostDebug("host.startup.refresh.final.done");
         }
         catch (OperationCanceledException)
         {
+            LogHostDebug("host.startup.refresh.cancelled");
         }
         catch (Exception ex)
         {
@@ -1720,9 +1740,15 @@ public partial class MainViewModel : ViewModelBase
     {
         var retryDelays = new[] { 300, 700, 1500 };
         Exception? lastException = null;
+        var hadVmSnapshotBeforeRefresh = AvailableVms.Count > 0;
+        LogHostDebug("host.vms.retry.begin HadSnapshot={HadSnapshot}; BusyIndicator={BusyIndicator}; PersistStartupCache={PersistStartupCache}",
+            hadVmSnapshotBeforeRefresh,
+            useBusyIndicator,
+            persistStartupCache);
 
         for (var attempt = 0; attempt <= retryDelays.Length; attempt++)
         {
+            LogHostDebug("host.vms.retry.attempt Attempt={Attempt}", attempt + 1);
             try
             {
                 await LoadVmsFromHyperVAsync(showSuccessNotification, useBusyIndicator, persistStartupCache);
@@ -1735,22 +1761,30 @@ public partial class MainViewModel : ViewModelBase
 
                 if (_lastVmRefreshReturnedEmpty)
                 {
-                    if (_lastVmRefreshEmptyWasConfirmed)
+                    var isFinalAttempt = attempt >= retryDelays.Length;
+                    if (_lastVmRefreshEmptyWasConfirmed && isFinalAttempt)
                     {
+                        LogHostDebug("host.vms.retry.empty.confirmed.final Attempt={Attempt}", attempt + 1);
                         break;
                     }
 
+                    LogHostDebug("host.vms.retry.empty.transient Attempt={Attempt}; Confirmed={Confirmed}", attempt + 1, _lastVmRefreshEmptyWasConfirmed);
                     continue;
                 }
 
                 if (AvailableVms.Count > 0)
                 {
+                    LogHostDebug("host.vms.retry.success Attempt={Attempt}; VmCount={VmCount}", attempt + 1, AvailableVms.Count);
                     return;
                 }
             }
             catch (Exception ex)
             {
                 lastException = ex;
+                LogHostDebug("host.vms.retry.exception Attempt={Attempt}; Type={Type}; Message={Message}",
+                    attempt + 1,
+                    ex.GetType().Name,
+                    ex.Message);
             }
 
             if (attempt < retryDelays.Length)
@@ -1767,18 +1801,47 @@ public partial class MainViewModel : ViewModelBase
 
             AddNotification(message, "Warning");
             StatusText = "Hyper-V nicht verfügbar";
+            LogHostDebug("host.vms.retry.fail.exception FinalMessage={FinalMessage}", message);
+            return;
+        }
+
+        if (AvailableVms.Count > 0)
+        {
+            StatusText = "Bereit";
+            LogHostDebug("host.vms.retry.end.kept-existing VmCount={VmCount}", AvailableVms.Count);
+            return;
+        }
+
+        if (TryReadStartupReadCache(out var startupCache)
+            && DateTimeOffset.UtcNow - startupCache.CapturedAtUtc <= StartupReadCacheMaxAge
+            && startupCache.Vms.Count > 0)
+        {
+            ApplyRuntimeVmSnapshot(startupCache.Vms, showSuccessNotification: false);
+            _consecutiveEmptyVmRefreshCount = 0;
+            _lastVmRefreshReturnedEmpty = false;
+            _lastVmRefreshEmptyWasConfirmed = false;
+
+            var fallbackMessage = hadVmSnapshotBeforeRefresh
+                ? "Live-Hyper-V lieferte vorübergehend keine VM-Liste. Letzte bekannte VM-Liste wurde aus dem Cache wiederhergestellt."
+                : "Live-Hyper-V lieferte vorübergehend keine VM-Liste. VM-Liste wurde aus dem Startup-Cache geladen.";
+            AddNotification(fallbackMessage, "Warning");
+            StatusText = "Bereit";
+            LogHostDebug("host.vms.retry.cache-fallback.applied VmCount={VmCount}", AvailableVms.Count);
             return;
         }
 
         AddNotification("Keine Hyper-V VMs gefunden. Bitte Hyper-V aktivieren/installieren.", "Warning");
         StatusText = "Keine Hyper-V VMs gefunden";
+        LogHostDebug("host.vms.retry.end.empty");
     }
 
     private async Task LoadVmsFromHyperVAsync(bool showSuccessNotification = true, bool useBusyIndicator = true, bool persistStartupCache = true)
     {
         async Task loadAction(CancellationToken token)
         {
+            LogHostDebug("host.vms.load.begin");
             var vms = await _hyperVService.GetVmsAsync(token);
+            LogHostDebug("host.vms.load.result RawVmCount={RawVmCount}", vms.Count);
 
             _lastVmRefreshReturnedEmpty = vms.Count == 0;
             _lastVmRefreshEmptyWasConfirmed = false;
@@ -1787,9 +1850,11 @@ public partial class MainViewModel : ViewModelBase
             {
                 _consecutiveEmptyVmRefreshCount = 0;
                 ApplyRuntimeVmSnapshot(vms, showSuccessNotification);
+                LogHostDebug("host.vms.load.applied VmCount={VmCount}", AvailableVms.Count);
                 if (persistStartupCache)
                 {
                     UpdateStartupReadCache(vms: vms);
+                    LogHostDebug("host.vms.load.cache.updated");
                 }
 
                 return;
@@ -1802,6 +1867,7 @@ public partial class MainViewModel : ViewModelBase
             {
                 Log.Warning(
                     "Hyper-V VM refresh returned an empty list. Keeping previous VM snapshot until a second consecutive empty refresh confirms it.");
+                LogHostDebug("host.vms.load.empty.first-confirmation PendingCount={PendingCount}", _consecutiveEmptyVmRefreshCount);
                 return;
             }
 
@@ -1809,6 +1875,7 @@ public partial class MainViewModel : ViewModelBase
             if (persistStartupCache)
             {
                 UpdateStartupReadCache(vms: vms);
+                LogHostDebug("host.vms.load.empty.confirmed.cache.updated");
             }
         }
 
@@ -2078,11 +2145,13 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task RefreshSwitchesAsync(bool showSuccessNotification = true, bool useBusyIndicator = true, bool persistStartupCache = true)
     {
+        LogHostDebug("host.switches.refresh.begin BusyIndicator={BusyIndicator}; PersistStartupCache={PersistStartupCache}", useBusyIndicator, persistStartupCache);
         AreSwitchesLoaded = false;
 
         async Task refreshAction(CancellationToken token)
         {
             var switches = await _hyperVService.GetVmSwitchesAsync(token);
+            LogHostDebug("host.switches.refresh.result SwitchCount={SwitchCount}", switches.Count);
 
             AvailableSwitches.Clear();
             foreach (var vmSwitch in switches.OrderBy(item => item.Name))
@@ -2102,6 +2171,7 @@ public partial class MainViewModel : ViewModelBase
             if (persistStartupCache)
             {
                 UpdateStartupReadCache(switches: switches);
+                LogHostDebug("host.switches.refresh.cache.updated");
             }
         }
 
@@ -2125,11 +2195,13 @@ public partial class MainViewModel : ViewModelBase
 
     private async Task RefreshHostNetworkProfileAsync()
     {
+        LogHostDebug("host.netprofile.refresh.begin");
         try
         {
             var profileCategory = await _hyperVService.GetHostNetworkProfileCategoryAsync(_lifetimeCancellation.Token);
             ApplyHostNetworkProfileCategory(profileCategory);
             _hostNetworkProfileLoadedOnce = true;
+            LogHostDebug("host.netprofile.refresh.ok Category={Category}", HostNetworkProfileCategory);
         }
         catch (OperationCanceledException)
         {
@@ -2138,6 +2210,7 @@ public partial class MainViewModel : ViewModelBase
         {
             Log.Warning(ex, "Host-Netzprofil konnte nicht ermittelt werden.");
             ApplyHostNetworkProfileCategory("Unknown");
+            LogHostDebug("host.netprofile.refresh.failed Message={Message}", ex.Message);
         }
     }
 
@@ -2200,6 +2273,14 @@ public partial class MainViewModel : ViewModelBase
         bool runVmOffAutoDetachSweep = false,
         bool runInventoryCleanup = false)
     {
+        LogHostDebug(
+            "host.usb.load.begin ShowNotification={ShowNotification}; AutoShare={AutoShare}; BusyIndicator={BusyIndicator}; VmOffSweep={VmOffSweep}; InventoryCleanup={InventoryCleanup}",
+            showNotification,
+            applyAutoShare,
+            useBusyIndicator,
+            runVmOffAutoDetachSweep,
+            runInventoryCleanup);
+
         if (!HostUsbSharingEnabled)
         {
             UsbDevices.Clear();
@@ -2213,6 +2294,7 @@ public partial class MainViewModel : ViewModelBase
             }
 
             NotifyTrayStateChanged();
+            LogHostDebug("host.usb.load.skip.disabled");
             return;
         }
 
@@ -2230,6 +2312,7 @@ public partial class MainViewModel : ViewModelBase
             try
             {
                 devices = await _usbIpService.GetDevicesAsync(token);
+                LogHostDebug("host.usb.load.inventory.raw RawCount={RawCount}", devices.Count);
 
                 var transientInventoryGap = devices.Count == 0
                     && previousUsbSnapshot.Count > 0
@@ -2307,6 +2390,8 @@ public partial class MainViewModel : ViewModelBase
                     {
                         AddNotification($"Auto-Share: {autoShareFailed} USB-Gerät(e) konnten nicht freigegeben werden.", "Warning");
                     }
+
+                    LogHostDebug("host.usb.load.autoshare Applied={Applied}; Failed={Failed}", autoShareApplied, autoShareFailed);
                 }
 
                 // Keep routine refreshes non-destructive. VM-off stale detach sweep must only run
@@ -2356,6 +2441,8 @@ public partial class MainViewModel : ViewModelBase
                 {
                     AddNotification(UsbStatusText, "Warning");
                 }
+
+                LogHostDebug("host.usb.load.failed Message={Message}", ex.Message);
 
                 return;
             }
@@ -2465,6 +2552,7 @@ public partial class MainViewModel : ViewModelBase
             UsbStatusText = UsbDevices.Count == 0
                 ? "Keine USB-Geräte gefunden."
                 : $"{UsbDevices.Count} USB-Gerät(e) geladen.";
+            LogHostDebug("host.usb.load.applied VisibleCount={VisibleCount}", UsbDevices.Count);
 
             UsbRuntimeAvailable = true;
             UsbRuntimeHintText = string.Empty;
@@ -3775,6 +3863,7 @@ public partial class MainViewModel : ViewModelBase
             SelectedVmNetworkAdapter = null;
             SelectedSwitch = null;
             NetworkSwitchStatusHint = "Keine VM ausgewählt.";
+            LogHostDebug("host.vmnet.ensure.skip.no-vm");
             return;
         }
 
@@ -3788,12 +3877,14 @@ public partial class MainViewModel : ViewModelBase
             {
                 ApplyVmNetworkAdaptersToSelection(selectedVmName, cachedRuntimeAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch);
                 appliedFromCache = true;
+                LogHostDebug("host.vmnet.ensure.cache-hit.runtime VmName={VmName}; AdapterCount={AdapterCount}", selectedVmName, cachedRuntimeAdapters.Count);
             }
 
             if (!appliedFromCache && TryGetStartupCachedVmNetworkAdapters(selectedVmName, out var cachedStartupAdapters))
             {
                 ApplyVmNetworkAdaptersToSelection(selectedVmName, cachedStartupAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch: false);
                 appliedFromCache = true;
+                LogHostDebug("host.vmnet.ensure.cache-hit.startup VmName={VmName}; AdapterCount={AdapterCount}", selectedVmName, cachedStartupAdapters.Count);
             }
 
             if (appliedFromCache)
@@ -3806,6 +3897,8 @@ public partial class MainViewModel : ViewModelBase
                         showNotificationOnMissingSwitch);
                 }
 
+                LogHostDebug("host.vmnet.ensure.cache-applied VmName={VmName}", selectedVmName);
+
                 return;
             }
 
@@ -3816,6 +3909,7 @@ public partial class MainViewModel : ViewModelBase
             if (completedTask != adaptersTask)
             {
                 NetworkSwitchStatusHint = "Netzwerkdaten werden im Hintergrund geladen...";
+                LogHostDebug("host.vmnet.ensure.timeout.background VmName={VmName}", selectedVmName);
 
                 if (TryMarkVmNetworkLiveRefreshPending(selectedVmName, force: true))
                 {
@@ -3839,10 +3933,12 @@ public partial class MainViewModel : ViewModelBase
             UpdateVmNetworkAdapterRuntimeCache(selectedVmName, normalizedAdapters);
             UpdateStartupReadCache(vmNetworkAdaptersVmName: selectedVmName, vmNetworkAdapters: normalizedAdapters);
             ApplyVmNetworkAdaptersToSelection(selectedVmName, normalizedAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch);
+            LogHostDebug("host.vmnet.ensure.live-applied VmName={VmName}; AdapterCount={AdapterCount}", selectedVmName, normalizedAdapters.Count);
         }
         catch (Exception ex)
         {
             Log.Warning(ex, "Netzwerkkarten für VM {VmName} konnten nicht gelesen werden.", SelectedVm.Name);
+            LogHostDebug("host.vmnet.ensure.failed VmName={VmName}; Message={Message}", SelectedVm.Name, ex.Message);
         }
     }
 
@@ -3851,6 +3947,7 @@ public partial class MainViewModel : ViewModelBase
         string? previouslySelectedAdapterName,
         bool showNotificationOnMissingSwitch)
     {
+        LogHostDebug("host.vmnet.live-refresh.begin VmName={VmName}", selectedVmName);
         try
         {
             var adapters = await _hyperVService.GetVmNetworkAdaptersAsync(selectedVmName, _lifetimeCancellation.Token);
@@ -3864,6 +3961,7 @@ public partial class MainViewModel : ViewModelBase
             UpdateVmNetworkAdapterRuntimeCache(selectedVmName, normalizedAdapters);
             UpdateStartupReadCache(vmNetworkAdaptersVmName: selectedVmName, vmNetworkAdapters: normalizedAdapters);
             ApplyVmNetworkAdaptersToSelection(selectedVmName, normalizedAdapters, previouslySelectedAdapterName, showNotificationOnMissingSwitch);
+            LogHostDebug("host.vmnet.live-refresh.ok VmName={VmName}; AdapterCount={AdapterCount}", selectedVmName, normalizedAdapters.Count);
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
@@ -3875,6 +3973,7 @@ public partial class MainViewModel : ViewModelBase
         finally
         {
             UnmarkVmNetworkLiveRefreshPending(selectedVmName);
+            LogHostDebug("host.vmnet.live-refresh.end VmName={VmName}", selectedVmName);
         }
     }
 
@@ -4540,6 +4639,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var vmName = SelectedVm.Name;
+        LogHostDebug("host.checkpoints.load.begin VmName={VmName}", vmName);
 
         try
         {
@@ -4554,6 +4654,7 @@ public partial class MainViewModel : ViewModelBase
 
             ApplyCheckpointSnapshotToUi(vmName, checkpoints, showSuccessNotification);
             UpdateStartupReadCache(checkpointVmName: vmName, vmCheckpoints: checkpoints);
+            LogHostDebug("host.checkpoints.load.ok VmName={VmName}; Count={Count}", vmName, checkpoints.Count);
         }
         catch (UnauthorizedAccessException ex)
         {
@@ -4564,6 +4665,7 @@ public partial class MainViewModel : ViewModelBase
         {
             Log.Error(ex, "Checkpoint laden fehlgeschlagen für VM {VmName}", vmName);
             AddNotification($"Fehler beim Laden der Checkpoints: {ex.Message}", "Error");
+            LogHostDebug("host.checkpoints.load.failed VmName={VmName}; Message={Message}", vmName, ex.Message);
         }
     }
 
@@ -9146,6 +9248,8 @@ public partial class MainViewModel : ViewModelBase
 
             HostSharedFolders.Add(normalized);
         }
+
+        LogHostDebug("host.sharedfolders.config.applied Count={Count}", HostSharedFolders.Count);
     }
 
     private static HostSharedFolderDefinition NormalizeSharedFolderDefinition(HostSharedFolderDefinition definition)
@@ -10198,6 +10302,9 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        var stopwatch = Stopwatch.StartNew();
+        LogHostDebug("host.busy.begin Text={Text}", busyText);
+
         IsBusy = true;
         BusyText = busyText;
         BusyProgressPercent = -1;
@@ -10220,6 +10327,9 @@ public partial class MainViewModel : ViewModelBase
         }
         finally
         {
+            stopwatch.Stop();
+            LogHostDebug("host.busy.end Text={Text}; ElapsedMs={ElapsedMs}; StatusText={StatusText}", busyText, stopwatch.ElapsedMilliseconds, StatusText);
+
             IsBusy = false;
             BusyText = "Bitte warten...";
             BusyProgressPercent = -1;
@@ -10228,6 +10338,22 @@ public partial class MainViewModel : ViewModelBase
             {
                 StatusText = "Bereit";
             }
+        }
+    }
+
+    private void LogHostDebug(string messageTemplate, params object?[] args)
+    {
+        if (!UiDebugLoggingEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            Log.Debug(messageTemplate, args);
+        }
+        catch
+        {
         }
     }
 

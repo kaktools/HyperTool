@@ -1883,16 +1883,27 @@ internal sealed class GuestMainWindow : Window
         listLayout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
         var headerGrid = new Grid { ColumnSpacing = 10, Margin = new Thickness(6, 2, 8, 2) };
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(122) });
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(280) });
 
         headerGrid.Children.Add(new TextBlock
         {
-            Text = "Device",
+            Text = "Status",
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             Opacity = 0.9,
             TextAlignment = TextAlignment.Left
         });
+
+        var deviceHeader = new TextBlock
+        {
+            Text = "Device",
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Opacity = 0.9,
+            TextAlignment = TextAlignment.Left
+        };
+        Grid.SetColumn(deviceHeader, 1);
+        headerGrid.Children.Add(deviceHeader);
 
         var commentHeader = new TextBlock
         {
@@ -1901,7 +1912,7 @@ internal sealed class GuestMainWindow : Window
             Opacity = 0.9,
             TextAlignment = TextAlignment.Left
         };
-        Grid.SetColumn(commentHeader, 1);
+        Grid.SetColumn(commentHeader, 2);
         headerGrid.Children.Add(commentHeader);
 
         listLayout.Children.Add(headerGrid);
@@ -1950,11 +1961,15 @@ internal sealed class GuestMainWindow : Window
     <Border x:Name='UsbRowBorder' CornerRadius='6' Padding='6,2,6,2' Background='Transparent'>
         <Grid ColumnSpacing='10'>
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width='122'/>
                 <ColumnDefinition Width='*'/>
                 <ColumnDefinition Width='280'/>
             </Grid.ColumnDefinitions>
-            <TextBlock x:Name='UsbDeviceNameText' Text='{Binding DeviceDisplayName}' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center'/>
-            <TextBlock x:Name='UsbDeviceCommentText' Grid.Column='1' Text='{Binding CustomCommentDisplay, Mode=OneWay}' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center' Opacity='0.92'/>
+            <Border x:Name='UsbStatusBadgeBorder' CornerRadius='10' Padding='8,2,8,2' BorderThickness='1' HorizontalAlignment='Left' VerticalAlignment='Center'>
+                <TextBlock x:Name='UsbStatusBadgeText' FontWeight='SemiBold' FontSize='11' Text='UNKNOWN'/>
+            </Border>
+            <TextBlock x:Name='UsbDeviceNameText' Grid.Column='1' Text='{Binding DeviceDisplayName}' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center'/>
+            <TextBlock x:Name='UsbDeviceCommentText' Grid.Column='2' Text='{Binding CustomCommentDisplay, Mode=OneWay}' TextTrimming='CharacterEllipsis' TextWrapping='NoWrap' VerticalAlignment='Center' Opacity='0.92'/>
         </Grid>
     </Border>
 </DataTemplate>
@@ -1977,19 +1992,45 @@ internal sealed class GuestMainWindow : Window
         }
 
         var rowBorder = FindDescendantByName<Border>(templateRoot, "UsbRowBorder");
+        var statusBadgeBorder = FindDescendantByName<Border>(templateRoot, "UsbStatusBadgeBorder");
+        var statusBadgeText = FindDescendantByName<TextBlock>(templateRoot, "UsbStatusBadgeText");
         var nameText = FindDescendantByName<TextBlock>(templateRoot, "UsbDeviceNameText");
         var commentText = FindDescendantByName<TextBlock>(templateRoot, "UsbDeviceCommentText");
-        if (rowBorder is null || nameText is null || commentText is null)
+        if (rowBorder is null || statusBadgeBorder is null || statusBadgeText is null || nameText is null || commentText is null)
         {
             return;
         }
 
-        var highlightAttached = device.IsAttachedInCurrentGuest || (device.IsAttached && !device.IsAttachedByOtherGuest);
-        if (highlightAttached)
+        var isBusy = device.IsAttachedByOtherGuest || device.IsGuestConnectionBlocked;
+        var isAttached = !isBusy && (device.IsAttachedInCurrentGuest || (device.IsAttached && !device.IsAttachedByOtherGuest));
+        var isConnected = !isBusy && !isAttached && device.IsConnected;
+
+        statusBadgeText.Text = isBusy
+            ? "BUSY"
+            : isAttached
+                ? "ATTACHED"
+                : isConnected
+                    ? "CONNECTED"
+                    : (device.StateText ?? "Unknown").Trim().ToUpperInvariant();
+        ApplyUsbStatusBadgeBrushes(statusBadgeBorder, statusBadgeText, templateRoot.ActualTheme, isBusy, isAttached, isConnected);
+
+        if (isBusy)
+        {
+            rowBorder.Background = ResolveBusyRowBrush(templateRoot);
+            nameText.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
+            commentText.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
+        }
+        else if (isAttached)
         {
             rowBorder.Background = ResolveAttachedRowBrush(templateRoot);
-            nameText.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
+            nameText.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
             commentText.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
+        }
+        else if (isConnected)
+        {
+            rowBorder.Background = ResolveConnectedRowBrush(templateRoot);
+            nameText.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
+            commentText.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
         }
         else
         {
@@ -1997,6 +2038,84 @@ internal sealed class GuestMainWindow : Window
             nameText.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
             commentText.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
         }
+    }
+
+    private static void ApplyUsbStatusBadgeBrushes(
+        Border badgeBorder,
+        TextBlock badgeText,
+        ElementTheme theme,
+        bool isBusy,
+        bool isAttached,
+        bool isConnected)
+    {
+        Color background;
+        Color border;
+        Color foreground;
+
+        if (isBusy)
+        {
+            if (theme == ElementTheme.Dark)
+            {
+                background = Color.FromArgb(0x72, 0x7A, 0x1E, 0x26);
+                border = Color.FromArgb(0xCC, 0xB8, 0x44, 0x52);
+                foreground = Color.FromArgb(0xFF, 0xFF, 0xD3, 0xD8);
+            }
+            else
+            {
+                background = Color.FromArgb(0xFF, 0xFA, 0xDE, 0xE2);
+                border = Color.FromArgb(0xFF, 0xD1, 0x63, 0x73);
+                foreground = Color.FromArgb(0xFF, 0x7B, 0x1E, 0x2D);
+            }
+        }
+        else if (isAttached)
+        {
+            if (theme == ElementTheme.Dark)
+            {
+                background = Color.FromArgb(0x72, 0x1C, 0x5F, 0x3D);
+                border = Color.FromArgb(0xCC, 0x35, 0xA0, 0x68);
+                foreground = Color.FromArgb(0xFF, 0xD0, 0xF6, 0xE0);
+            }
+            else
+            {
+                background = Color.FromArgb(0xFF, 0xDA, 0xF3, 0xE6);
+                border = Color.FromArgb(0xFF, 0x3D, 0xA1, 0x6B);
+                foreground = Color.FromArgb(0xFF, 0x1F, 0x64, 0x40);
+            }
+        }
+        else if (isConnected)
+        {
+            if (theme == ElementTheme.Dark)
+            {
+                background = Color.FromArgb(0x72, 0x1A, 0x4D, 0x73);
+                border = Color.FromArgb(0xCC, 0x3F, 0x8C, 0xBF);
+                foreground = Color.FromArgb(0xFF, 0xCC, 0xEA, 0xFF);
+            }
+            else
+            {
+                background = Color.FromArgb(0xFF, 0xDB, 0xED, 0xFB);
+                border = Color.FromArgb(0xFF, 0x4C, 0x8F, 0xC3);
+                foreground = Color.FromArgb(0xFF, 0x1F, 0x5A, 0x85);
+            }
+        }
+        else
+        {
+            if (theme == ElementTheme.Dark)
+            {
+                background = Color.FromArgb(0x4E, 0x34, 0x3E, 0x52);
+                border = Color.FromArgb(0xAA, 0x67, 0x76, 0x90);
+                foreground = Color.FromArgb(0xE8, 0xD8, 0xE3, 0xF2);
+            }
+            else
+            {
+                background = Color.FromArgb(0xFF, 0xEA, 0xF0, 0xF8);
+                border = Color.FromArgb(0xFF, 0xB5, 0xC2, 0xD0);
+                foreground = Color.FromArgb(0xFF, 0x45, 0x52, 0x62);
+            }
+        }
+
+        badgeBorder.Background = new SolidColorBrush(background);
+        badgeBorder.BorderBrush = new SolidColorBrush(border);
+        badgeText.Foreground = new SolidColorBrush(foreground);
     }
 
     private static Brush ResolveAttachedRowBrush(FrameworkElement themeSource)
@@ -2010,6 +2129,28 @@ internal sealed class GuestMainWindow : Window
 
         // Dezent in der gleichen Farbfamilie wie der "Aktiv"-Chip (Light).
         return new SolidColorBrush(Color.FromArgb(0xA6, 0xE8, 0xF8, 0xEF));
+    }
+
+    private static Brush ResolveConnectedRowBrush(FrameworkElement themeSource)
+    {
+        var theme = themeSource.ActualTheme;
+        if (theme == ElementTheme.Dark)
+        {
+            return new SolidColorBrush(Color.FromArgb(0x42, 0x1A, 0x48, 0x66));
+        }
+
+        return new SolidColorBrush(Color.FromArgb(0x8C, 0xE2, 0xF0, 0xFB));
+    }
+
+    private static Brush ResolveBusyRowBrush(FrameworkElement themeSource)
+    {
+        var theme = themeSource.ActualTheme;
+        if (theme == ElementTheme.Dark)
+        {
+            return new SolidColorBrush(Color.FromArgb(0x46, 0x66, 0x1D, 0x28));
+        }
+
+        return new SolidColorBrush(Color.FromArgb(0x92, 0xFA, 0xE2, 0xE7));
     }
 
     private static T? FindDescendantByName<T>(DependencyObject root, string name)
